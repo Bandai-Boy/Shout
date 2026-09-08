@@ -1,0 +1,22 @@
+# --- PHI and recordings: never commit these -------------------------------
+# The whole premise of this project is that audio never leaves the machine.
+# Meeting recordings and their transcripts can contain PHI, and git history is
+# forever, so the audio/ and transcripts/ directories are excluded wholesale.
+# The JFK reference clip is the one exception: it is a public benchmark sample
+# and the warmup + smoke gates depend on it.
+audio/*
+!audio/jfk.wav
+transcripts/
+*.16k.wav
+
+# --- environment ----------------------------------------------------------
+.venv/
+models/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+
+# --- scratch --------------------------------------------------------------
+scratch_*.log
+*.log
