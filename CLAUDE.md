@@ -138,3 +138,25 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   `GetAsyncKeyState` poll seeing the chord held while the gesture machine reports
   nothing. If hotkeys ever "just stop working", check `shout.log` for reinstall lines
   before suspecting pynput.
+
+- [2026-09-08] Shout kept dying because a Windows Terminal window titled "Shout"
+  was open and Gabe kept closing it, reasonably assuming it was scaffolding.
+  Cause: **uv builds a venv from trampoline shims and installed the CONSOLE one
+  under both names** - `.venv/Scripts/pythonw.exe` is byte-identical to
+  `python.exe` (same md5) and its PE subsystem is 3, not 2. So the "pythonw: no
+  console window" comment in the installer was false: the trampoline allocated a
+  conhost and spawned the base console `python.exe` as a child, and closing the
+  terminal killed that child. Fix: `install_shortcuts.ps1` now installs
+  `.venv/Scripts/shoutw.exe`, a copy of the real GUI-subsystem `pythonw.exe`
+  with `python3*.dll` beside it, and asserts subsystem 2 both before and after
+  copying. Python finds the venv from `pyvenv.cfg` one directory up and does not
+  care what the exe is called, so `sys.prefix` still resolves to `.venv`. A
+  separate name, not an overwrite: uv's trampoline is locked while Shout runs
+  and `uv sync` would restore it anyway. Those files are gitignored, so
+  **re-run the installer after any venv rebuild**. -> Never trust an
+  interpreter's NAME to tell you whether it opens a console; read the PE
+  subsystem (`e_lfanew` at 0x3c, subsystem at +0x5c). Corollary that cost a
+  round trip here: the installer first verified the fix by capturing the new
+  exe's stdout, which is always empty precisely BECAUSE it is GUI-subsystem - a
+  check that passes by measuring nothing. Verify a windowed process through a
+  file it writes, never through its pipeline output.
