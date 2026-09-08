@@ -1,8 +1,8 @@
 # Handoff — 8 Sep 2026
 
 Session 2 is complete and committed. Shout now tells you it is listening, by ear
-and by eye. Tree is clean at `b3ea920` except for one uncommitted CLAUDE.md edit
-(see Current state). **Shout is running right now** — PID 26636.
+and by eye. Tree is clean at `59d257d`. **Shout is running right now** — PID
+26636.
 
 ---
 
@@ -42,12 +42,9 @@ turns out to be clutter.
 
 ## Current state
 
-Branch `master`. `b3ea920` is session 2; `5413b08`, `a864bcf`, `e531c26`,
-`8c094df` are session 1 and its follow-ups.
-
-**One uncommitted change:** `CLAUDE.md` gained a "run the gates from a real
-terminal" gotcha, written after the fact below. Commit it or fold it into your
-next commit — nothing depends on it being separate.
+Branch `master`. `59d257d` records the gate-invocation trap below; `b3ea920` is
+session 2; `5413b08`, `a864bcf`, `e531c26`, `8c094df` are session 1 and its
+follow-ups. Nothing uncommitted.
 
 Deliberately deferred, not forgotten: hotwords, per-app paste keys, a settings
 UI, VAD tuning, and idle VRAM release. Each waits until friction demands it.
@@ -78,7 +75,7 @@ re-deriving.
 
 ## Verified
 
-Run just now, from Bash, against the committed tree with Shout stopped:
+Run from Bash, against the committed tree, with Shout stopped:
 
 - **8 gates, 122 assertions, ~23s.** 8/8.
 - `Cues.play()` at **0.001ms**; cue lengths 112ms / 112ms / 164ms, all zero-valued
