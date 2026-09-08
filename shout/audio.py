@@ -43,6 +43,7 @@ class Recorder:
         self._ring: collections.deque[np.ndarray] = collections.deque()
         self._ring_len = 0
         self._xruns = 0
+        self.level = 0.0   # RMS of the last block; read by the overlay
 
     # -- device ------------------------------------------------------------
 
@@ -66,6 +67,7 @@ class Recorder:
         buf = indata.copy()
         if self._capturing:
             self._chunks.append(buf)
+            self.level = float(np.sqrt(np.mean(np.square(buf))))
         elif self._preroll_samples:
             self._ring.append(buf)
             self._ring_len += len(buf)
@@ -121,6 +123,7 @@ class Recorder:
         """Returns mono float32 at 16kHz. Empty array if nothing was captured."""
         with self._lock:
             self._capturing = False
+            self.level = 0.0
             chunks, self._chunks = self._chunks, []
             rate = self._rate
             if self.preroll_ms == 0:
@@ -139,4 +142,5 @@ class Recorder:
     def close(self) -> None:
         with self._lock:
             self._capturing = False
+            self.level = 0.0
             self._close()

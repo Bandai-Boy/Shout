@@ -73,6 +73,48 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   whole local-only premise. `set_clipboard_text(private=True)` sets
   `ExcludeClipboardContentFromMonitorProcessing` plus the two DWORD-0 formats. History
   is currently off on this box; do not rely on that.
+- [2026-09-08] Tk overlay, four traps found by probing before writing any of it.
+  (1) **`deiconify()` calls `SetForegroundWindow` unconditionally**, so it steals
+  focus even with `WS_EX_NOACTIVATE` already applied before the first map — which
+  would break dictation with the app's own UI, on an app that autostarts. The
+  window is therefore created withdrawn and NEVER deiconified; visibility is
+  `ShowWindow(SW_SHOWNOACTIVATE / SW_HIDE)` directly, and Tk keeps laying out and
+  repainting perfectly well while believing it is withdrawn. (2) The FIRST
+  `-alpha` or `-transparentcolor` call **wipes GWL_EXSTYLE**, because Tk rewrites
+  it from its own cached copy when making the window layered; later calls are
+  harmless. Set both during construction, before the flags, and re-assert the
+  flags anyway. (3) `winfo_id()` is NOT the top-level hwnd even with
+  `overrideredirect(True)` — Tk still wraps it, so every Win32 call needs
+  `GetAncestor(GA_ROOT)`. (4) Tk **defers a geometry request on a window it
+  thinks is withdrawn** until idle tasks run, so `_reposition()` must call
+  `update_idletasks()` or the pill silently stays at 0,0 — which is exactly how
+  it first failed. Use `MonitorFromWindow` + `rcWork`, not `SPI_GETWORKAREA`:
+  the latter is the primary monitor's work area only and misplaces the pill on a
+  second screen.
+- [2026-09-08] The handoff's audio-cue mitigation ("play the cue before opening
+  the mic; device start costs 50-200ms, which the cue spends being over") is
+  **refuted**: `recorder.start()` costs 14-22ms on this machine, so the ordering
+  buys ~15ms of a 112ms cue and the cue lands in the capture at ~130x ambient.
+  The first gate I wrote asserted a band-energy ceiling and failed at 48000x —
+  correctly measuring bleed, while asserting the wrong property. What actually
+  matters is the transcript, and there the bleed is inert: bleed-then-speech is
+  byte-identical to the same speech alone, and the bleed alone transcribes to ""
+  because the VAD rejects a pure tone. `probe_cues.py` now asserts that, gated on
+  a loud reference tone proving the speaker-to-mic path is live — without that
+  control, headphones would make both assertions pass trivially. **If the tones
+  are ever changed, re-run it**: the property being relied on is "not
+  speech-like", which a longer or more complex cue could break.
+- [2026-09-08] Two harness bugs that had nothing to do with the feature. A probe
+  printing an em-dash in its LAST line killed `gates.py` with a cp1252
+  `UnicodeEncodeError` *after every gate had already run* — the runner prints
+  only that line, so no other probe had ever triggered it. And `gates.py` had no
+  per-gate timeout: the positive control for the shutdown assertion (removing
+  `tray.stop()`) hangs `probe_app` forever on pystray's non-daemon thread, which
+  would have hung the whole suite with no output. Both fixed; the suite now
+  forces utf-8 in both directions and reports a `TIMED OUT` row. Partial stdout
+  from a killed child is still usually lost on Windows even unbuffered, so the
+  timeout row has to name its own likely cause.
+
 - [2026-09-08] A dead low-level hook cannot report itself: `listener.running` stays True
   because the pynput message loop is alive, it just never gets called. The detector has
   to observe the same reality by a different route — the watchdog's 20Hz

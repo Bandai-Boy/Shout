@@ -277,3 +277,90 @@ stuck-key guard.
 Overlay, latch (if deferred), VAD tuning, hotword dictionaries for TCG and medical
 vocabulary, settings UI, autostart, per-app paste-key overrides (classic consoles need
 Ctrl+Shift+V).
+
+---
+
+# Shout — Session 2: Feedback
+
+Two items, both requested after real use: **you cannot tell whether it is
+listening.** Audio cues answer that with your ears, the overlay pill answers it
+with your eyes. Nothing else from the old session 2 list was built.
+
+## Definition of done
+
+- [x] A cue on start, a distinct cue on stop, a third on latch — synthesized, not sampled.
+- [x] Cues fire with no perceptible delay and never block the chord.
+- [x] The cue does not corrupt the transcript.
+- [x] A pill above the taskbar showing state and a live audio level.
+- [x] The overlay never takes focus, never appears in alt-tab, never eats a click.
+- [x] It sits on the monitor holding the focused window, against the work area.
+- [x] The app still starts, runs and **exits** with two GUI event loops in one process.
+
+### Measured, 8 Sep 2026
+
+| | |
+|---|---|
+| Gate suite | **8 gates, 122 assertions, ~23s** (was 5 / 81 / ~14s) |
+| `Cues.play()` | **0.001ms** — a cursor rebind; PortAudio's callback does the work |
+| Cue lengths | start/stop 112ms, latch 164ms; all zero-valued at both edges |
+| READY from launch | **2.21s** with cues, overlay, tray and model all composed |
+| Overlay placement | 14px above the work area, centred on a 3440px monitor |
+| Cue bleed into the mic | ~130x ambient — **present**, and transcript-identical anyway |
+
+## The architectural question the handoff flagged
+
+pystray owned the main thread and Tk needs to own a thread. Settled by reading
+pystray's own source rather than guessing: `_win32.py` creates its window *and*
+pumps its message loop inside `_run()`, so both land on whichever thread calls
+it, and `run_detached()` is the backend's supported integration path. Tk has no
+equivalent. **Only one of the two could move, so Tk took main and the tray
+detached.** `probe_app.py` covers the composition, including that the process can
+still exit — pystray's detached thread is not a daemon, and dropping
+`tray.stop()` hangs the app forever with no error.
+
+## Traps found while building
+
+### 1. Tk's `deiconify()` steals focus even with WS_EX_NOACTIVATE
+
+It calls `SetForegroundWindow` unconditionally. Measured against a control: the
+identical window shown with `ShowWindow(SW_SHOWNOACTIVATE)` does not steal focus,
+the one shown with `deiconify()` does. The overlay is therefore created withdrawn
+and **never deiconified** — visibility is driven through Win32 directly, and Tk
+goes on laying it out and repainting it while believing it is hidden.
+
+### 2. The first `-alpha` call wipes the ex-style
+
+Tk rewrites `GWL_EXSTYLE` from its own cached copy when it makes a window
+layered, silently dropping NOACTIVATE, TOOLWINDOW and TRANSPARENT. Later calls
+are harmless. Set the layered attributes during construction, apply the flags
+after, and re-assert them on every show.
+
+### 3. "Play the cue before opening the mic" does not work — and does not need to
+
+The session-1 handoff proposed it on the assumption that opening the device costs
+50-200ms, which the cue would spend being over. **Measured: `recorder.start()`
+costs 14-22ms**, so the ordering hides ~15ms of a 112ms cue and the rest lands in
+the capture at ~130x ambient.
+
+The first version of the gate asserted a band-energy ceiling and failed at
+48000x — correctly measuring the bleed while asserting the wrong property. What
+matters is the transcript, and there it is inert: the bleed alone transcribes to
+`""` and bleed-then-speech is byte-identical to that speech alone, because the
+VAD rejects a pure tone. `probe_cues.py` asserts that, gated on a loud reference
+tone proving the speaker-to-mic path is live — without which headphones would
+make both assertions pass trivially.
+
+**If the tones are ever changed, re-run it.** The property being relied on is
+"not speech-like", and a longer or more complex cue could break it.
+
+### 4. Screenshots of a transparent window show the desktop, not your backdrop
+
+The first QC sheet appeared to show a broken right end cap. It was the live
+desktop coming through the pill's rounded corners. Re-shot over a known backdrop
+in two colours, the pill is correct. A capture bbox must also be read *after* the
+window is positioned — the build-time geometry is `+0+0`.
+
+## Deferred, still
+
+Hotwords, per-app paste keys, settings UI, VAD tuning, idle VRAM release. All
+wait until friction demands them.

@@ -69,6 +69,15 @@ class Tray:
     def run(self) -> None:
         self.icon.run()
 
+    def run_detached(self) -> None:
+        """Run the tray on its own thread, leaving the main thread for Tk.
+
+        pystray's win32 backend creates its window and pumps its message loop
+        inside _run(), so both land on whichever thread calls it — detaching is
+        the backend's own supported integration path, not a workaround.
+        """
+        self.icon.run_detached()
+
     def stop(self) -> None:
         try:
             self.icon.stop()

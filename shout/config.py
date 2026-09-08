@@ -39,6 +39,12 @@ class Config:
     clipboard_restore_ms: int = 300  # delay before restoring the previous clipboard
     restore_clipboard: bool = True
 
+    # --- feedback ---
+    cues: bool = True                # audio blips on start / stop / latch
+    cue_volume: float = 0.25         # 0.0-1.0, amplitude of the synthesized tones
+    output_device: int | None = None  # None = system default
+    overlay: bool = True             # the state pill above the taskbar
+
     # --- diagnostics ---
     log_level: str = "INFO"
 
