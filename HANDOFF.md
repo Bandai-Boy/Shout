@@ -87,6 +87,20 @@ Multi-monitor: it should appear on the monitor holding the focused window.
 - Does the 300–350ms latch window ever swallow two quick separate push-to-talks?
 - Is `MIN_AUDIO_S = 0.25` the right floor for ignoring a stray tap?
 - Which words, if any, eventually earn a hotword entry?
+- **Does the resident model cost anything while gaming?** Measured 8 Sep: a warmed
+  Shout holds **~2.3 GB of the 12 GB card** (5250 MiB vs a 2924 MiB baseline), and
+  holds it across at least 90s of idle. Note that is well under the ~6 GB quoted in
+  `RESEARCH.html`, which is peak inference including beam-search working memory, not
+  resident weights. One earlier data point suggested Windows had evicted an idle
+  instance's VRAM entirely — killing it freed only 12 MiB — which would mean WDDM
+  reclaims it under pressure from other GPU apps. **That mechanism is unproven**;
+  it was not reproducible on demand without real memory pressure.
+
+  If games ever feel starved, the fix is already available and verified to exist:
+  `WhisperModel.model.unload_model(to_cpu=True)` parks the weights in system RAM
+  and `load_model()` brings them back, so an idle timer could release VRAM after
+  N minutes and reload on the next chord press. Do not build this speculatively —
+  wait until a game actually stutters.
 
 ## Not started
 
