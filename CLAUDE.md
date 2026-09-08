@@ -57,6 +57,23 @@ transcribe whatever the microphone hears, and paste it into whatever window has
 focus. Quit Shout from the tray before running `harness/gates.py`. The same applies
 to `probe_stuck.py`, which physically holds the chord to fake a dead hook.
 
+Observed 8 Sep 2026: leaving Shout running fails the **inject** gate specifically.
+
+## Gotcha: run the gates from a real terminal, not a detached launcher
+
+`probe_hook`, `probe_stuck` and `probe_overlay` all depend on the launching
+process holding Windows **foreground/input rights**, which Windows grants to a
+child of the foreground process. Run from the PowerShell tool via `& python
+gates.py` the same tree reported **6/8** — the hook gate lost an assertion and
+the overlay gate reported INCONCLUSIVE because its focus-theft control could not
+demonstrate theft. Run from Bash, the identical commit reports 8/8. Nothing was
+wrong with the code either time.
+
+Two consequences. A 6/8 with those specific gates failing means *check how you
+invoked it* before believing a regression. And the overlay gate failing safe —
+INCONCLUSIVE rather than a false PASS — is the control doing its job, so do not
+"fix" it by loosening the control.
+
 ## Lab Notes
 
 _Project-specific failure modes and refinements. Read this section before committing to
