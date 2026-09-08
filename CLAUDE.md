@@ -49,6 +49,14 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 - Benchmark timing: 11s of audio, warm median 0.36s, 30.8× realtime. Anything far off
   that is a regression, not variance.
 
+## Gotcha: never run the gates while Shout is running
+
+`harness/probe_hook.py` synthesizes a real Ctrl+Win chord with `SendInput`, and a
+live Shout instance cannot tell that apart from a human — it will start recording,
+transcribe whatever the microphone hears, and paste it into whatever window has
+focus. Quit Shout from the tray before running `harness/gates.py`. The same applies
+to `probe_stuck.py`, which physically holds the chord to fake a dead hook.
+
 ## Lab Notes
 
 _Project-specific failure modes and refinements. Read this section before committing to

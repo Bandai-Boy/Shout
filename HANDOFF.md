@@ -102,6 +102,10 @@ Multi-monitor: it should appear on the monitor holding the focused window.
   N minutes and reload on the next chord press. Do not build this speculatively —
   wait until a game actually stutters.
 
+  To test it: the comparison only means something against a control, so quit Shout
+  from the tray menu and play the same scene again. "Felt fine" with it running is
+  not evidence either way.
+
 ## Not started
 
 The meeting/PHI pipeline (`scripts/transcribe_meeting.py`) is untouched and
