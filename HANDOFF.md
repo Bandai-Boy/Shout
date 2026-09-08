@@ -1,134 +1,157 @@
 # Handoff — 8 Sep 2026
 
-Session 2 is complete and committed. Shout now tells you it is listening, by ear
-and by eye. Tree is clean at `59d257d`. **Shout is running right now** — PID
-26636.
+Session 3 is complete and committed. Shout is a real application now: it launches
+with no terminal window, starts with Windows, and shows a persistent pill above
+the taskbar. Tree is clean at `c06ca07`. **Shout is running right now** — PID
+17140, no config file, so every setting is a dataclass default.
 
 ---
 
 ## ⚠ Waiting on Gabe
 
-Four judgements that no gate can make, because they are about how the thing
-*feels* in use. The pill has been screenshotted and asserted, but no human has
-yet seen it during a real dictation. All four are one-line edits in
-`%APPDATA%/Shout/config.json` followed by a restart.
+### 1. Judge how the pill looks, and say what to change
+This is the actual next task and everything else waits behind it. The pill is on
+screen at rest right now; dictate a few times to see it expand, show the
+waveform, and switch to "Transcribing". It was invisible except mid-sentence
+until this session, which is exactly why no useful opinion about it existed.
 
-### 1. Decide whether `cue_volume` is right
-Currently `0.25`. It has to carry over whatever you are doing without startling
-you. **This is the number most likely to be wrong** and the only way to know is
-to dictate a few times with music or a video playing.
-**Success:** you hear the start blip without flinching, and you never find
-yourself checking the tray to see whether it caught the chord.
+Useful specifics: resting lozenge size (78×44), gap above the taskbar (14px),
+expanded width (268px), expansion speed, waveform density and brightness, the
+per-state colours. All are constants at the top of `shout/overlay.py`.
+**Success:** a list of changes in your own words — "smaller at rest", "slower",
+"less red" — is enough; they map to single constants.
 
-### 2. Decide whether the three cues are distinguishable without looking
-Start is a rising two-note blip, stop is the same two notes falling, latch is
-start plus a third higher note. **Latch is the one at risk** — it shares its
-first two notes with start, so mid-task it may not read as "I have latched."
-**Success:** you can tell a latch from a plain push-to-talk by ear alone. If not,
-the fix is a different interval for latch, not a louder one — say so and it is a
-two-line change in `_TONES` in `shout/cues.py`, plus a re-run of `probe_cues`.
+### 2. Decide whether `cue_volume` is right
+Still `0.25`, still unjudged — carried from session 2. It has to carry over
+whatever you are doing without startling you, and the only way to know is to
+dictate a few times with music or a video playing.
+**Success:** you hear the start blip without flinching, and never find yourself
+checking the tray to see whether it caught the chord.
 
-### 3. Confirm the pill is in the right place
-It sits 14px above the taskbar, centred on the monitor holding the focused
-window, and follows focus across monitors.
-**Success:** it is visible where you naturally glance, and never covers something
-you needed. On the 3440px ultrawide it lands at x=1597.
+### 3. Decide whether latch is distinguishable by ear
+Start is a rising two-note blip, latch is the same two notes plus a higher third.
+It shares its first two notes with start, so mid-task it may not read as "I have
+latched". **Success:** you can tell a latch from a plain push-to-talk without
+looking. If not, say so — the fix is a different *interval*, and it is already
+folded into the sound-preset plan below rather than being a separate change.
 
-### 4. Decide whether either surface is noise rather than feedback
-`cues` and `overlay` are independent booleans, both `true`. Turn either off if it
-turns out to be clutter.
+### 4. Confirm the pill actually disappears in a game
+New this session and unverifiable from here: the pill hides itself while idle
+when `SHQueryUserNotificationState` reports a fullscreen or presentation app, and
+deliberately stays visible while recording, latched or transcribing. Whether that
+API fires for the games you actually play is a real-world question.
+**Success:** launch a game, see the pill gone; dictate inside it, see it appear.
 
 ---
 
 ## Current state
 
-Branch `master`. `59d257d` records the gate-invocation trap below; `b3ea920` is
-session 2; `5413b08`, `a864bcf`, `e531c26`, `8c094df` are session 1 and its
-follow-ups. Nothing uncommitted.
+Branch `master`. `c06ca07` is the Qt port, `080c942` the launcher fix; everything
+before that is sessions 1–2. Nothing uncommitted.
 
-Deliberately deferred, not forgotten: hotwords, per-app paste keys, a settings
-UI, VAD tuning, and idle VRAM release. Each waits until friction demands it.
-Everything the old session-2 list contained beyond cues and the overlay was cut
-on purpose.
+**Decisions already made — do not relitigate:** Qt (PySide6) owns all UI; the
+pill is **click-through**, not clickable; the future stats view keeps **counts
+only, never transcript text**. Gabe chose all three explicitly.
 
-No gitignored files in the repo changed this session — `scratch_bench.log` and
-`scratch_probe.log` still date from 7 Sep. The runtime log lives **outside** the
-repo at `%APPDATA%\Shout\shout.log` (rotating, 1MB × 3) and is where anything
-about a live run has to be read from.
+Deliberately deferred, in this order: the settings window, the sound presets, the
+counts view. All three were held back on purpose because they depend on the
+answers above — the presets in particular are partly an answer to items 2 and 3.
+Still deferred from earlier sessions: hotwords, per-app paste keys, VAD tuning,
+idle VRAM release.
+
+**Gitignored files changed this session** (invisible to `git status`):
+`.venv/Scripts/shoutw.exe` plus `python312.dll` and `python3.dll` beside it —
+installed by `scripts/install_shortcuts.ps1` and **required for Shout to launch
+without a console**. A venv rebuild silently removes them; re-run that script.
+Also `.venv/` generally (PySide6-Essentials 6.11.2 added) and the `__pycache__`
+directories. `scratch_bench.log` and `scratch_probe.log` still date from 7 Sep.
+
+The runtime log lives outside the repo at `%APPDATA%\Shout\shout.log`.
 
 ## What was done
 
-- `shout/cues.py` — three synthesized tones, preloaded, played through a
-  persistent output stream. `play()` is a single attribute rebind.
-- `shout/overlay.py` — the pill. Never takes focus, never in alt-tab, clicks pass
-  through it.
-- `shout/__main__.py` — Tk moved to the main thread, tray detached beside it.
-  Capture state now outranks "loading", so the pill appears if you dictate while
-  the model is still warming.
-- `shout/audio.py` — per-block RMS on `Recorder.level`, feeding the meter.
-- `harness/probe_cues.py`, `probe_overlay.py`, `probe_app.py` — three new gates.
-- `harness/gates.py` — per-gate timeout, utf-8 forced both directions.
+- **The terminal window was a launcher bug, not scaffolding.** uv installed its
+  *console* trampoline as `.venv/Scripts/pythonw.exe` — byte-identical to
+  `python.exe`, PE subsystem 3. `install_shortcuts.ps1` now installs a real
+  GUI-subsystem `shoutw.exe` and asserts the subsystem on both sides of the copy.
+- **`shout/overlay.py` rewritten on Qt.** Persistent, collapsed at rest, animated
+  expansion, mirrored waveform from a level history, soft shadow and antialiased
+  corners (impossible under Tk, whose transparency was a chroma key), and the
+  fullscreen policy in item 4.
+- **`shout/tray.py`** is QSystemTrayIcon; pystray and its non-daemon thread are
+  gone. **`shout/__main__.py`** runs one Qt event loop for both surfaces.
+- **`harness/probe_overlay.py`** and **`probe_app.py`** rewritten; `probe_app`
+  gained stage markers and a watchdog.
 
-Why each non-obvious decision went the way it did is in `PLAN.md` under *Session
-2: Feedback*; the failure modes are in `CLAUDE.md` Lab Notes. Neither needs
-re-deriving.
+Why each non-obvious decision went the way it did is in the module docstrings and
+`CLAUDE.md` Lab Notes. Neither needs re-deriving.
 
 ## Verified
 
 Run from Bash, against the committed tree, with Shout stopped:
 
-- **8 gates, 122 assertions, ~23s.** 8/8.
-- `Cues.play()` at **0.001ms**; cue lengths 112ms / 112ms / 164ms, all zero-valued
-  at both edges.
-- Overlay at 14px above the work area, centred, correct size, click-through
-  confirmed functionally via `WindowFromPoint` rather than by reading the flag.
-- App reaches **READY in 2.14s** from launch with everything composed.
+- **8 gates, 157 assertions, ~27s. 8/8.** (Was 122 assertions.)
+- READY in **2.09s** from launch, against a 2.14s baseline.
+- Idle CPU **1.12%** of one core with the overlay on, against a **1.37%** control
+  with `overlay: false` — the pill's cost is *below* noise, and that baseline is
+  the watchdog's 20Hz key poll.
+- Launcher: `shoutw.exe` runs with **no child process and no console window** in
+  a full window enumeration; before the fix the same enumeration found a
+  `PseudoConsoleWindow` and a Windows Terminal titled "Shout".
 
 **What was proved able to fail** — the part that makes the green meaningful:
-- The overlay focus gate shows an *identically configured* window stealing focus
-  via `deiconify()`. Without that control the "did not take focus" row is worth
-  nothing, and the gate reports INCONCLUSIVE rather than passing when the control
-  cannot demonstrate theft.
-- The cue bleed gate plays a loud reference tone first; on headphones it reports
-  SKIPPED instead of passing trivially.
-- Removing `tray.stop()` from `_quit` was run as a control and **hung the probe
-  forever**, which is how the missing per-gate timeout was found.
+- Reverting the cross-thread quit fix hangs `probe_app` at exactly the stage it
+  names. That bug (`QApplication.quit()` from a worker never ends the loop) was
+  found by the gate, not by reasoning.
+- The overlay focus gate still shows an identically-flagged window stealing
+  focus, and reports INCONCLUSIVE rather than passing if it cannot.
+- The cue gate still plays a loud reference tone first and reports SKIPPED on
+  headphones instead of passing trivially.
 
-**What is NOT verified:** everything in *Waiting on Gabe*. Nobody has watched the
-pill during a real dictation, and the cue volume and latch distinctness are
-unjudged. The gates prove the pill is correctly placed and cannot steal focus;
-they say nothing about whether it is *pleasant*.
+**What is NOT verified:** everything in *Waiting on Gabe*. No human has yet
+watched the pill during a real dictation, the fullscreen hide has never met a
+real game, and the cue volume and latch distinctness remain unjudged.
 
 ## Running things
 
-Shout is live as **PID 26636** (`pythonw.exe -m shout`), started from the Start
-menu shortcut via explorer so it is not tied to any session. It also autostarts
-at boot. A second copy exits on the single-instance mutex, so relaunching is
-harmless.
+Shout is live as **PID 17140** (`shoutw.exe -m shout`), started from the Start
+menu shortcut. It autostarts at login. A second copy exits on the single-instance
+mutex, so relaunching is harmless. **It is running the code as committed** — if
+you change anything under `shout/`, quit from the tray and relaunch or you are
+testing the old build.
 
-**It is running the code as committed.** If you change anything under `shout/`,
-quit it from the tray and restart, or you will be testing the old build.
+There is **no `config.json`**; every setting is a default. Creating one at
+`%APPDATA%\Shout\config.json` overrides only the keys it contains.
 
-Standing commands are in `CLAUDE.md`; do not copy them here.
+Standing commands and the two gate-invocation traps are in `CLAUDE.md`; do not
+copy them here.
 
 ## Next
 
-1. **Use it for a day, then answer the four questions above.** This is genuinely
-   the next task — the remaining backlog was deferred pending exactly this
-   feedback, so guessing at it now would be building on nothing.
-2. If the latch cue turns out to be indistinct, retune `_TONES` in
-   `shout/cues.py` and re-run `probe_cues`.
-   - **Trap:** that gate's transcript assertions rely on the cue being *not
-     speech-like* — the VAD is what makes the bleed harmless. A longer or more
-     complex cue can break that, and the failure would be a stray word in your
-     dictation, not a gate error. Re-run `probe_cues` after any tone change.
-3. Only then consider hotwords or per-app paste keys.
-
-**Trap that will cost you a round trip otherwise:** if `harness/gates.py` reports
-6/8 with `hook` and `overlay` failing, nothing is broken — you invoked it from a
-detached launcher instead of a real terminal, and those gates need the launching
-process to hold Windows foreground rights. Quit Shout first too, or `inject`
-fails. Both are written up in `CLAUDE.md`.
+1. **Gabe answers the four items above.** Genuinely the next task — the remaining
+   backlog was deferred pending exactly this feedback.
+2. **Sound presets**, once items 2 and 3 are answered. The design agreed this
+   session: one preset = one *material*, and the three cues are three *gestures*
+   on it — struck once rising for start, once falling for stop, and **twice
+   quickly for latch**, mirroring the double-tap. That replaces "start plus a
+   third note" and is the structural fix for item 3. Candidate materials: Blip
+   (current), Wood, Marimba, Glass, Drop, Tick. Build a standalone preview script
+   *before* wiring any of it into the app — restarting Shout to audition a sound
+   is far too slow a loop to converge on taste.
+   - **Trap:** `probe_cues` asserts that cue bleed does not change the
+     transcript, and the property it relies on is that the VAD rejects a *pure
+     tone*. Whisper hallucinates confident garbage on ambiguous non-speech, so a
+     noise-based preset (Tick, and anything breathy) can break that — and the
+     failure is a stray word in your dictation, not a gate error. Harmonic
+     presets are structurally safe; re-run `probe_cues` for every preset and cut
+     any that fails.
+3. **Settings window and the counts view**, last. Both touch `__main__.py` and
+   the Qt app object, so they are strictly serial after each other and after any
+   overlay changes from item 1 — there is no fan-out available in this phase.
+   - **Trap:** anything that quits or touches a widget from a non-GUI thread must
+     follow the `stop()`-sets-a-flag / `teardown()`-after-`exec()` split already
+     in `overlay.py` and `tray.py`. Qt does not raise on a cross-thread widget
+     touch; it corrupts quietly.
 
 ## Open questions
 
@@ -136,14 +159,14 @@ fails. Both are written up in `CLAUDE.md`.
 - Is `MIN_AUDIO_S = 0.25` the right floor for ignoring a stray tap?
 - Which words, if any, eventually earn a hotword entry?
 - **Does the resident model cost anything while gaming?** Still unmeasured
-  against a control. A warmed Shout holds ~2.3 GB of the 12 GB card. If a game
-  stutters, `unload_model(to_cpu=True)` / `load_model()` is verified to exist —
-  but do not build an idle-release timer speculatively. Test it properly: quit
-  Shout from the tray and replay the same scene. "Felt fine" with it running is
-  not evidence either way.
+  against a control. A warmed Shout holds ~2.3 GB of the 12 GB card.
+  `unload_model(to_cpu=True)` / `load_model()` is verified to exist — but do not
+  build an idle-release timer speculatively. Test it properly: quit Shout from
+  the tray and replay the same scene. "Felt fine" with it running is not evidence.
 
 ## Also open
 
-- The meeting/PHI pipeline (`scripts/transcribe_meeting.py`) is untouched and
-  unrelated to the dictation app.
+- `harness/probe_inject.py` still imports Tk for a throwaway text field. Harmless
+  and unrelated to the app, but Tk is therefore still a harness dependency.
+- The meeting/PHI pipeline (`scripts/transcribe_meeting.py`) is untouched.
 - The noScribe-vs-WhisperX diarization decision in `RESEARCH.html` is still open.
