@@ -20,6 +20,12 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 - Python 3.12 venv at `.venv/`, created with `uv`.
 - faster-whisper 1.2.1, CTranslate2 4.8.2, cuBLAS 12.9, cuDNN 9.25 — all pip wheels.
   No cmake, no MSVC, no CUDA Toolkit.
+- PySide6-Essentials 6.11.2 owns both UI surfaces (pill + tray). Tk and pystray
+  are gone from the app; `harness/probe_inject.py` still uses Tk for a throwaway
+  text field, which is unrelated.
+- The launcher is `.venv/Scripts/shoutw.exe`, installed by
+  `scripts/install_shortcuts.ps1`. It is gitignored — re-run that script after
+  any venv rebuild or Shout goes back to opening a terminal window.
 - Model `large-v3-turbo` cached in the HF hub cache. `models/` is empty and unused.
 - Target: RTX 5070, 12GB, sm_120 (Blackwell) · Ryzen 7 9800X3D · Win 11.
 
@@ -160,3 +166,36 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   exe's stdout, which is always empty precisely BECAUSE it is GUI-subsystem - a
   check that passes by measuring nothing. Verify a windowed process through a
   file it writes, never through its pipeline output.
+
+- [2026-09-08] Ported the pill and the tray from Tk+pystray to Qt. Three of the
+  four Tk traps in the note above simply do not exist on Qt, measured in one
+  recon probe before a line of it was written: `winId()` IS the top-level hwnd,
+  `WA_ShowWithoutActivating` means `show()` never activates, and
+  `WA_TranslucentBackground` is real per-pixel alpha rather than a chroma key —
+  which is what the old jagged corners and missing shadow actually were. Qt's
+  window flags produce WS_EX_NOACTIVATE / TOOLWINDOW / TRANSPARENT unaided; the
+  gate still reads the bits off the real window, because a future Qt changing
+  that mapping would present as dictation silently going nowhere. **Do that recon
+  probe first on any toolkit swap** — it converted every "will Qt do X" into a
+  measured yes/no for the cost of one call, including that Qt and Win32
+  coordinates agree exactly here (dpr 1.0 on both monitors) and that CTranslate2
+  loads fine in a Qt process.
+- [2026-09-08] `QApplication.quit()` called from a WORKER thread does not end the
+  event loop — `app.exec()` blocks forever, with no error. Use
+  `QMetaObject.invokeMethod(app, "quit", Qt.ConnectionType.QueuedConnection)`.
+  Same family: any `stop()` that a worker thread might call must only set a flag,
+  with the real widget teardown deferred until after `exec()` returns, because a
+  QWidget or QTimer touched from the wrong thread does not raise — it corrupts
+  quietly. `probe_app` quits from a worker deliberately so this stays caught.
+  **The in-probe watchdog did NOT fire on that hang**: the wedged thread held the
+  GIL, so no other Python thread could run. A watchdog thread only covers hangs
+  that release the GIL — `gates.py`'s subprocess timeout is the real backstop,
+  and that layering is the point, not redundancy.
+- [2026-09-08] Ran a long probe as `python -u probe.py | tail -40` and read the
+  empty output as "the probe produced nothing", then spent two round trips
+  hunting a hang that was in a completely different place than I thought.
+  `tail` emits nothing until EOF, so piping a still-running process through it
+  hides every line it has already printed. → Never pipe a probe you are waiting
+  on through `tail`/`sort`/`wc`; redirect to a file and read the file. Related to
+  the 2026-08-31 note about CLIs changing their output when piped, but a
+  different mechanism: here the output was correct and simply withheld.

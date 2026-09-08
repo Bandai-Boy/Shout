@@ -3,17 +3,19 @@
     python -m shout
 
 Threading model:
-    main        Tk mainloop, owned by the overlay — Tk is not thread-safe and
-                must own whichever thread it runs on
-    tray        pystray message loop, detached (its win32 backend creates its
-                window and pumps messages on whichever thread calls _run)
+    main        Qt event loop. The overlay and the tray both live here — Qt
+                objects may only be touched from the thread that created them
     hook        pynput WH_KEYBOARD_LL callback — enqueue and return, nothing else
     worker      drains the queue, runs the gesture machine, starts/stops capture
     watchdog    20ms poll: ticks, missed key-ups, dead-hook detection
     commit      single worker so transcripts are injected in the order spoken
 
-The main thread went to Tk rather than to pystray because pystray supports
-detaching on Windows and Tk does not: only one of the two could move.
+Session 2 had to split the two feedback surfaces across two threads, because Tk
+and pystray each wanted a main loop and only pystray could detach. On Qt they
+share one, so that thread is gone. State reaches both surfaces as attribute
+rebinds read by a timer on the GUI thread rather than as queued signals: it is
+the same discipline the Tk version used, and it keeps a 60Hz level meter off the
+signal machinery entirely.
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+
+from PySide6 import QtCore, QtWidgets
 
 from .audio import Recorder
 from .config import Config, config_dir
@@ -200,16 +204,21 @@ class Shout:
 
     # -- lifecycle ----------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self, app: QtWidgets.QApplication) -> None:
+        self.tray.build()
+        self.overlay.build()
         threading.Thread(target=self._load_model, name="model", daemon=True).start()
         self.recorder.arm()
         self.hotkey.start()
         self.watchdog.start()
         log.info("hold Ctrl+Win to dictate; double-tap to latch hands-free")
-        self.tray.run_detached()
-        self.overlay.run()   # blocks: Tk owns the main thread until quit
+        app.exec()           # blocks: Qt owns the main thread until quit
+        # Only now is it safe to touch the widgets, whichever thread asked to quit.
+        self.overlay.teardown()
+        self.tray.teardown()
 
     def _quit(self) -> None:
+        """Runs on the GUI thread, from the tray menu."""
         self._stopping = True
         log.info("shutting down")
         self.watchdog.stop()
@@ -219,6 +228,13 @@ class Shout:
         self.commits.shutdown(wait=False)
         self.overlay.stop()
         self.tray.stop()
+        # Not a direct QApplication.quit(): from a worker thread that sets a
+        # flag the GUI thread never looks at, and app.exec() blocks forever.
+        # Measured by probe_app, which quits from a worker deliberately.
+        # Queued, this runs quit() on the thread that owns the loop.
+        QtCore.QMetaObject.invokeMethod(
+            QtWidgets.QApplication.instance(), "quit",
+            QtCore.Qt.ConnectionType.QueuedConnection)
 
 
 def main() -> int:
@@ -227,7 +243,13 @@ def main() -> int:
     if not _claim_single_instance():
         log.error("Shout is already running")
         return 1
-    Shout(cfg).run()
+    app = QtWidgets.QApplication(sys.argv)
+    # Shout has no ordinary window, and the pill hides itself whenever a game is
+    # fullscreen. Without this, that hide is the last window closing and Qt
+    # exits the app — the dictation hotkey would die the first time you played
+    # something.
+    app.setQuitOnLastWindowClosed(False)
+    Shout(cfg).run(app)
     return 0
 
 

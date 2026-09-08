@@ -1,29 +1,37 @@
-"""Gate: the overlay is visible, correctly placed, and never takes focus.
+"""Gate: the pill is visible, correctly placed, animated, and never takes focus.
 
 The focus assertion is the one that matters — a focus-stealing overlay breaks
-dictation with its own UI, silently, because the text simply goes nowhere. So it
-is measured against a POSITIVE CONTROL: an identically-configured window shown
-with Tk's own `deiconify()`, which must be seen stealing focus. If the control
-cannot demonstrate focus theft then the detector proves nothing about the
-subject, and this gate reports INCONCLUSIVE rather than passing.
+dictation with the app's own UI, silently, because the text then simply goes
+nowhere. So it is measured against a POSITIVE CONTROL: an identically-flagged Qt
+window with only the focus-preventing attributes removed, which must be seen
+stealing focus. If the control cannot demonstrate theft then the detector proves
+nothing about the subject, and this gate reports INCONCLUSIVE rather than
+passing.
 
-Run with Shout quit — two overlays on screen make the placement rows meaningless.
+Qt produces WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW and WS_EX_TRANSPARENT from its
+own window flags, so these rows look redundant. They are not: they read the bits
+off the real window, so a future Qt version quietly changing that mapping fails
+here instead of failing as dictation that goes nowhere.
+
+Run with Shout quit — two pills on screen make the placement rows meaningless.
 """
 from __future__ import annotations
 
 import ctypes
 import sys
 import time
-import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shout.overlay import (GA_ROOT, GWL_EXSTYLE, HEIGHT, MARGIN_Y,
-                           SW_SHOWNOACTIVATE, WANTED_EXSTYLE, WIDTH,
-                           WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                           WS_EX_TRANSPARENT, Overlay, _get_long, user32)
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
+
+from shout.overlay import (COLLAPSED_W, EXPANDED_W, GA_ROOT, GWL_EXSTYLE,  # noqa: E402
+                           HEIGHT, MARGIN_Y, SHADOW, WANTED_EXSTYLE, WIN_H,
+                           WIN_W, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                           WS_EX_TRANSPARENT, Overlay, _get_long,
+                           fullscreen_app_running, user32)
 
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -33,12 +41,22 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
 
+user32.WindowFromPoint.argtypes = [POINT]
+
 rows: list[tuple[bool, str, str]] = []
+app: QtWidgets.QApplication
 
 
 def check(ok: bool, name: str, detail: str = "") -> bool:
     rows.append((bool(ok), name, detail))
     return bool(ok)
+
+
+def spin(seconds: float) -> None:
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        app.processEvents()
+        QtCore.QThread.msleep(3)
 
 
 def rect(hwnd: int) -> wintypes.RECT:
@@ -51,45 +69,47 @@ def visible(hwnd: int) -> bool:
     return bool(user32.IsWindowVisible(wintypes.HWND(hwnd)))
 
 
-def control_steals_focus(root: tk.Tk) -> bool:
-    """Identically configured — overrideredirect, topmost, layered, and the very
-    same ex-style flags. The ONLY difference is that it is shown with Tk's
-    deiconify() instead of ShowWindow(SW_SHOWNOACTIVATE)."""
-    w = tk.Toplevel(root)
-    w.withdraw()
-    w.overrideredirect(True)
-    w.attributes("-topmost", True)
-    w.attributes("-alpha", 0.96)
-    tk.Label(w, text="control", bg="#17171c", fg="#f0f0f4").pack()
-    w.geometry(f"{WIDTH}x{HEIGHT}+400+400")
-    w.update_idletasks()
-    h = int(user32.GetAncestor(wintypes.HWND(w.winfo_id()), GA_ROOT))
-    from shout.overlay import _set_long
-    _set_long(wintypes.HWND(h), GWL_EXSTYLE,
-              _get_long(wintypes.HWND(h), GWL_EXSTYLE) | WANTED_EXSTYLE)
-    w.deiconify()
-    w.update()
-    time.sleep(0.45)
-    root.update()
+def control_steals_focus() -> bool:
+    """Identically flagged — frameless, tool, topmost, translucent — with ONLY
+    the three focus-preventing settings removed. That difference is exactly the
+    thing under test, so the control isolates it."""
+    w = QtWidgets.QWidget()
+    w.setWindowFlags(
+        QtCore.Qt.WindowType.FramelessWindowHint
+        | QtCore.Qt.WindowType.Tool
+        | QtCore.Qt.WindowType.WindowStaysOnTopHint
+    )
+    w.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    w.setFixedSize(WIN_W, WIN_H)
+    w.move(400, 400)
+    w.show()
+    w.raise_()
+    w.activateWindow()
+    spin(0.5)
+    h = int(w.winId())
     stole = int(user32.GetForegroundWindow()) == h
-    w.destroy()
-    root.update()
-    time.sleep(0.25)
+    w.hide()
+    w.deleteLater()
+    spin(0.3)
     return stole
 
 
 def main() -> int:
+    global app
+    app = QtWidgets.QApplication(sys.argv[:1])
+    app.setQuitOnLastWindowClosed(False)
+
     # The control runs FIRST, while the process still reliably holds the
     # foreground rights Windows grants a child of the foreground process.
-    probe_root = tk.Tk()
-    probe_root.withdraw()
-    control = control_steals_focus(probe_root)
-    probe_root.destroy()
+    control = control_steals_focus()
 
-    ov = Overlay(enabled=True, level_source=lambda: 0.05)
-    ov._build()
+    level = {"v": 0.0}
+    ov = Overlay(enabled=True, level_source=lambda: level["v"])
+    ov.build()
     hwnd = ov._hwnd
     check(hwnd != 0, "window created", f"hwnd={hwnd}")
+    check(hwnd == int(user32.GetAncestor(wintypes.HWND(hwnd), GA_ROOT)),
+          "winId() is the top-level hwnd (no Tk-style wrapper)")
 
     ex = _get_long(wintypes.HWND(hwnd), GWL_EXSTYLE)
     check(ex & WS_EX_NOACTIVATE, "WS_EX_NOACTIVATE set")
@@ -99,12 +119,9 @@ def main() -> int:
     # -- focus: the subject, against the control ---------------------------
     before = int(user32.GetForegroundWindow())
     ov.set_state("recording")
-    ov._update()
-    time.sleep(0.45)
+    spin(0.5)
     after = int(user32.GetForegroundWindow())
-    subject_stole = after == hwnd
-    check(not subject_stole, "overlay did not take focus",
-          f"foreground {before} -> {after}")
+    check(after != hwnd, "pill did not take focus", f"foreground {before} -> {after}")
     check(after == before, "foreground window unchanged")
 
     # -- click-through, functionally rather than by flag -------------------
@@ -115,29 +132,65 @@ def main() -> int:
           f"WindowFromPoint={under}")
 
     # -- placement ----------------------------------------------------------
-    left, top, right, bottom = ov._work_area()
+    a = ov.work_area()
     check(visible(hwnd), "visible while recording")
-    check(r.bottom <= bottom, "sits inside the work area, above the taskbar",
-          f"pill bottom={r.bottom} work bottom={bottom}")
-    check(r.bottom == bottom - MARGIN_Y, "correct gap above the taskbar",
-          f"gap={bottom - r.bottom}px")
-    check(r.top >= top, "does not run off the top of the work area")
-    expected_x = left + (right - left - WIDTH) // 2
+    # The window carries a painted shadow margin, so the PILL's bottom edge is
+    # SHADOW px above the window's. Asserting the window rect would silently
+    # bake the shadow into the gap and drift the pill on any shadow change.
+    pill_bottom = r.bottom - SHADOW
+    check(pill_bottom <= a.bottom() + 1, "sits inside the work area",
+          f"pill bottom={pill_bottom} work bottom={a.bottom()}")
+    check(abs((a.bottom() + 1 - pill_bottom) - MARGIN_Y) <= 1,
+          "correct gap above the taskbar",
+          f"gap={a.bottom() + 1 - pill_bottom}px want={MARGIN_Y}px")
+    check(r.top >= a.top(), "does not run off the top of the work area")
+    expected_x = a.left() + (a.width() - WIN_W) // 2
     check(abs(r.left - expected_x) <= 1, "horizontally centred",
           f"left={r.left} expected={expected_x}")
-    check((r.right - r.left, r.bottom - r.top) == (WIDTH, HEIGHT), "size is as declared",
-          f"{r.right - r.left}x{r.bottom - r.top}")
+    check((r.right - r.left, r.bottom - r.top) == (WIN_W, WIN_H),
+          "window size is as declared", f"{r.right - r.left}x{r.bottom - r.top}")
 
-    # -- state drives visibility -------------------------------------------
-    for state, want in (("latched", True), ("working", True),
-                        ("idle", False), ("loading", False), ("recording", True)):
+    # -- persistence: the change from session 2 -----------------------------
+    for state, want in (("idle", True), ("loading", True), ("latched", True),
+                        ("working", True), ("recording", True)):
         ov.set_state(state)
-        ov._update()
-        ov.root.update()
-        check(visible(hwnd) == want, f"state {state!r} -> visible={want}")
+        spin(0.12)
+        check(visible(hwnd) == want, f"state {state!r} -> visible={want}",
+              "persistent" if want else "")
+
+    # -- expansion ----------------------------------------------------------
+    ov.set_state("idle")
+    spin(0.9)
+    check(abs(ov.pill_width - COLLAPSED_W) < 1.0, "idle collapses to the lozenge",
+          f"width={ov.pill_width:.1f} want={COLLAPSED_W}")
+    ov.set_state("recording")
+    widths = []
+    for _ in range(14):
+        spin(0.02)
+        widths.append(ov.pill_width)
+    spin(0.9)
+    check(abs(ov.pill_width - EXPANDED_W) < 1.0, "recording expands to full width",
+          f"width={ov.pill_width:.1f} want={EXPANDED_W}")
+    tweens = [w for w in widths if COLLAPSED_W + 2 < w < EXPANDED_W - 2]
+    # Without this the pill could hard-cut between two widths and every other
+    # width row above would still pass.
+    check(len(tweens) >= 3, "expansion is animated, not a hard cut",
+          f"{len(tweens)} intermediate widths sampled")
+
+    # -- fullscreen policy --------------------------------------------------
+    # Exercised directly: waiting for a real game to be running is not a gate.
+    ov._fullscreen = True
+    check(ov._visible_for("idle") is False, "hides when idle under a fullscreen app")
+    check(ov._visible_for("recording") is True,
+          "still shows while RECORDING under a fullscreen app",
+          "feedback matters most exactly when something is covering the screen")
+    check(ov._visible_for("working") is True, "still shows while transcribing")
+    ov._fullscreen = False
+    check(isinstance(fullscreen_app_running(), bool),
+          "SHQueryUserNotificationState answers")
 
     # -- the ex-style survives a full cycle of real use --------------------
-    check(ov.has_exstyle(), "flags intact after show/hide/reposition cycles")
+    check(ov.has_exstyle(), "flags intact after show/hide/expand cycles")
 
     # -- level meter mapping ------------------------------------------------
     check(ov._to_bar(0.0) == 0.0, "silence maps to an empty meter")
@@ -146,17 +199,28 @@ def main() -> int:
     check(0.0 < quiet < loud < 1.0, "speech levels land strictly inside the bar",
           f"quiet={quiet:.2f} loud={loud:.2f}")
 
+    # -- the waveform carries history, not one repeated number --------------
+    ov.set_state("recording")
+    spin(0.1)
+    for v in (0.001, 0.06, 0.001, 0.06, 0.001):
+        level["v"] = v
+        spin(0.09)
+    hist = list(ov.history)
+    check(len(hist) == ov.history.maxlen, "history buffer is full",
+          f"{len(hist)} samples")
+    check(max(hist) - min(hist) > 0.15,
+          "history holds a varying envelope, not one repeated level",
+          f"min={min(hist):.2f} max={max(hist):.2f}")
+
     ov.stop()
-    try:
-        ov.root.destroy()
-    except Exception:
-        pass
+    spin(0.1)
 
     # -- report -------------------------------------------------------------
     for ok, name, detail in rows:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if detail else ""))
     passed = sum(ok for ok, _, _ in rows)
-    print(f"  [{'ok' if control else 'FAIL'}] CONTROL: deiconify() was seen stealing focus")
+    print(f"  [{'ok' if control else 'FAIL'}] CONTROL: an activating window was "
+          f"seen stealing focus")
 
     if not control:
         print(f"INCONCLUSIVE - the control could not demonstrate focus theft, so "
