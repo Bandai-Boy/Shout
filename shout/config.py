@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 
@@ -42,6 +42,11 @@ class Config:
     # --- feedback ---
     cues: bool = True                # audio blips on start / stop / latch
     cue_volume: float = 0.25         # 0.0-1.0, amplitude of the synthesized tones
+    # How those three gestures sound. `cue_preset` names a material in
+    # shout.cues.PRESETS; `cue_voice` overrides individual fields on top of it.
+    # Both are what `scripts/cue_lab.py` writes when you save an audition.
+    cue_preset: str = "blip"
+    cue_voice: dict = field(default_factory=dict)
     output_device: int | None = None  # None = system default
     overlay: bool = True             # the state pill above the taskbar
 

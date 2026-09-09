@@ -27,11 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from shout.overlay import (COLLAPSED_W, EXPANDED_W, GA_ROOT, GWL_EXSTYLE,  # noqa: E402
-                           HEIGHT, MARGIN_Y, SHADOW, WANTED_EXSTYLE, WIN_H,
-                           WIN_W, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                           WS_EX_TRANSPARENT, Overlay, _get_long,
-                           fullscreen_app_running, user32)
+from shout.overlay import (BAR_MAX_H, COLLAPSED_W, DOT_INSET, GA_ROOT,  # noqa: E402
+                           GWL_EXSTYLE, HEIGHT, LABEL_GAP, MAX_PILL_W,
+                           METER_GAP, METER_W, MARGIN_Y, RIGHT_INSET, SHADOW,
+                           WANTED_EXSTYLE, WIN_H, WIN_W, WS_EX_NOACTIVATE,
+                           WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, Overlay,
+                           _get_long, expanded_width, fullscreen_app_running,
+                           user32)
 
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -163,19 +165,59 @@ def main() -> int:
     spin(0.9)
     check(abs(ov.pill_width - COLLAPSED_W) < 1.0, "idle collapses to the lozenge",
           f"width={ov.pill_width:.1f} want={COLLAPSED_W}")
+    rec_w = ov.expanded_width_for("recording")
     ov.set_state("recording")
     widths = []
     for _ in range(14):
         spin(0.02)
         widths.append(ov.pill_width)
     spin(0.9)
-    check(abs(ov.pill_width - EXPANDED_W) < 1.0, "recording expands to full width",
-          f"width={ov.pill_width:.1f} want={EXPANDED_W}")
-    tweens = [w for w in widths if COLLAPSED_W + 2 < w < EXPANDED_W - 2]
+    check(abs(ov.pill_width - rec_w) < 1.0, "recording expands to its state width",
+          f"width={ov.pill_width:.1f} want={rec_w:.0f}")
+    tweens = [w for w in widths if COLLAPSED_W + 2 < w < rec_w - 2]
     # Without this the pill could hard-cut between two widths and every other
     # width row above would still pass.
     check(len(tweens) >= 3, "expansion is animated, not a hard cut",
           f"{len(tweens)} intermediate widths sampled")
+
+    # -- per-state width ----------------------------------------------------
+    # Width is derived from the parts each state draws, so these assert the
+    # LAYOUT rather than restating a constant: dropping the word from recording
+    # has to actually buy back the pixels it used, and the bar row has to still
+    # get its full span in every state that draws one.
+    work_w = ov.expanded_width_for("working")
+    label_w = ov.widget.label_width("working")
+    check(rec_w < work_w - 40.0, "the unlabelled recording pill is the short one",
+          f"recording={rec_w:.0f} vs working={work_w:.0f} ('Transcribing')")
+    check(abs((rec_w - DOT_INSET - LABEL_GAP - RIGHT_INSET) - METER_W) < 0.5,
+          "recording spends its whole width on the bars",
+          f"bar span={rec_w - DOT_INSET - LABEL_GAP - RIGHT_INSET:.0f}px want={METER_W:.0f}")
+    check(abs((work_w - DOT_INSET - LABEL_GAP - label_w - METER_GAP
+               - RIGHT_INSET) - METER_W) < 0.5,
+          "a labelled state still gets the same bar span, not a squeezed one",
+          f"label={label_w:.0f}px + bars={METER_W:.0f}px")
+    check(ov.widget.label_width("recording") == 0.0,
+          "recording carries no word (the red dot is the message)")
+    for state in ("loading", "recording", "latched", "working", "error"):
+        w = ov.expanded_width_for(state)
+        check(COLLAPSED_W < w <= MAX_PILL_W,
+              f"{state}: width is expanded and fits the window", f"{w:.0f}px")
+    check(BAR_MAX_H < HEIGHT, "the bars fit inside the pill",
+          f"bars={BAR_MAX_H:.1f}px in {HEIGHT}px")
+
+    # A state change between two EXPANDED widths must glide, not snap — the
+    # recording -> transcribing handoff happens on every single dictation.
+    ov.set_state("working")
+    glide = []
+    for _ in range(14):
+        spin(0.02)
+        glide.append(ov.pill_width)
+    spin(0.9)
+    check(abs(ov.pill_width - work_w) < 1.0, "working settles at its own width",
+          f"width={ov.pill_width:.1f} want={work_w:.0f}")
+    check(len([w for w in glide if rec_w + 2 < w < work_w - 2]) >= 3,
+          "recording -> working widens smoothly rather than snapping",
+          f"{len([w for w in glide if rec_w + 2 < w < work_w - 2])} intermediate widths")
 
     # -- fullscreen policy --------------------------------------------------
     # Exercised directly: waiting for a real game to be running is not a gate.

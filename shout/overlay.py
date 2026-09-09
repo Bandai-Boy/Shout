@@ -80,16 +80,29 @@ _set_long.restype = ctypes.c_ssize_t
 
 # -- geometry ----------------------------------------------------------------
 
-HEIGHT = 44
+HEIGHT = 31
 COLLAPSED_W = 78
-EXPANDED_W = 268
 MARGIN_Y = 14           # gap between the pill and the top of the taskbar
 SHADOW = 10             # painted margin around the pill for the drop shadow
+
+# Expanded width is DERIVED per state rather than being one constant, because
+# the states carry different amounts of text and a width sized for the longest
+# of them leaves the one you see most — recording, which now carries no label at
+# all — padded with dead space. The pieces below are the layout; the width is
+# whatever they add up to, so removing a word actually shortens the pill instead
+# of just moving the gap around.
+DOT_INSET = 20.0        # dot centre from the pill's left edge, fully expanded
+LABEL_GAP = 14.0        # dot centre -> start of the label
+METER_GAP = 12.0        # end of the label -> start of the bars
+METER_W = 122.0         # span of the bar row; unchanged, so waveform density is
+RIGHT_INSET = 18.0
+MIN_EXPANDED_W = COLLAPSED_W + 20.0   # below this, expanding is not legible
+MAX_PILL_W = 268.0      # window capacity; derived widths are clamped to it
 
 # The window is always the largest it can get, so it never resizes while
 # animating — only what is painted inside it changes. Resizing a layered
 # top-level 60 times a second is visibly janky and makes placement race.
-WIN_W = EXPANDED_W + SHADOW * 2
+WIN_W = int(MAX_PILL_W) + SHADOW * 2
 WIN_H = HEIGHT + SHADOW * 2
 
 FRAME_MS = 16           # 60Hz while anything is moving
@@ -115,10 +128,14 @@ ACCENT = {
     "working": QtGui.QColor(235, 168, 50),
     "error": QtGui.QColor(200, 64, 64),
 }
+# Recording deliberately carries NO word. A pulsing red dot is already the
+# universal "this is recording", so the label was spending ~90px of the pill on
+# something the colour had already said — and that pill is the one on screen
+# every time you speak. The states that are NOT self-evident keep their word.
 LABEL = {
     "loading": "Starting",
     "idle": "",
-    "recording": "Recording",
+    "recording": "",
     "latched": "Hands-free",
     "working": "Transcribing",
     "error": "Error",
@@ -133,6 +150,12 @@ BARS = 27
 BAR_W = 3.0
 BAR_GAP = 2.0
 BAR_MIN = 2.0
+# Both of these are fractions of HEIGHT rather than fixed pixels, so changing
+# the pill's thickness keeps its proportions instead of leaving the bars filling
+# it edge to edge. 0.59 and 0.13 are what they measured at HEIGHT = 44.
+BAR_MAX_H = HEIGHT * 0.59
+DOT_R = HEIGHT * 0.13   # a shade over proportional: with the word gone, this
+HALO_R = HEIGHT * 0.11  # dot is the entire "you are recording" signal
 
 # Level meter: map dBFS onto the bar. Quiet speech sits near -40dB.
 DB_FLOOR, DB_CEIL = -52.0, -12.0
@@ -149,6 +172,19 @@ def _ease(t: float) -> float:
     expansion read as a physical object rather than a resize."""
     t = min(1.0, max(0.0, t))
     return t * t * (3.0 - 2.0 * t)
+
+
+def expanded_width(state: str, label_w: float) -> float:
+    """How wide the pill has to be to hold this state, from the parts it draws.
+
+    `label_w` is MEASURED off the real font by the widget rather than estimated:
+    it picks the pill's width, and a wrong guess would silently clip a word or
+    leave a gap with nothing to trace it back to."""
+    w = DOT_INSET + LABEL_GAP + label_w
+    if state in METERED_STATES or state == "working":
+        w += (METER_GAP if label_w else 0.0) + METER_W
+    w += RIGHT_INSET
+    return min(MAX_PILL_W, max(MIN_EXPANDED_W, w))
 
 
 def fullscreen_app_running() -> bool:
@@ -176,6 +212,15 @@ class PillWidget(QtWidgets.QWidget):
         self.setFixedSize(WIN_W, WIN_H)
         self._font = QtGui.QFont("Segoe UI", 9)
         self._font.setWeight(QtGui.QFont.Weight.Medium)
+        fm = QtGui.QFontMetricsF(self._font)
+        self._label_w = {state: (fm.horizontalAdvance(text) if text else 0.0)
+                         for state, text in LABEL.items()}
+
+    def label_width(self, state: str) -> float:
+        return self._label_w.get(state, 0.0)
+
+    def width_for(self, state: str) -> float:
+        return expanded_width(state, self.label_width(state))
 
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
         ov = self._ov
@@ -211,12 +256,15 @@ class PillWidget(QtWidgets.QWidget):
         # Centred while collapsed, sliding to a fixed inset as the pill grows.
         # Pinning it to the left edge outright leaves it visibly off-centre in
         # the resting lozenge, which is the shape that is on screen all day.
-        dot_x = x + _lerp(COLLAPSED_W / 2.0, 20.0, _ease(self._ov.expand))
-        dot_r = 4.5
+        dot_x = x + _lerp(COLLAPSED_W / 2.0, DOT_INSET, _ease(self._ov.expand))
+        dot_r = DOT_R
         if ov.state in METERED_STATES:
             # A halo scaled by input level: visible confirmation that it is
             # hearing you, which survives being seen out of the corner of an eye.
-            halo = dot_r + 5.0 * ov.meter
+            # With the word "Recording" gone this is also the whole message, so
+            # it is deliberately a level pulse and not a blink — it says heard
+            # you, which a fixed-period blink does not.
+            halo = dot_r + HALO_R * ov.meter
             p.setBrush(QtGui.QColor(accent.red(), accent.green(), accent.blue(), 60))
             p.drawEllipse(QtCore.QPointF(dot_x, cy), halo, halo)
         p.setBrush(accent)
@@ -235,16 +283,19 @@ class PillWidget(QtWidgets.QWidget):
         p.setOpacity(reveal)
 
         label = LABEL.get(ov.state, "")
-        text_x = dot_x + 14.0
+        label_w = self.label_width(ov.state)
+        text_x = dot_x + LABEL_GAP
         if label:
             p.setFont(self._font)
             p.setPen(TEXT if ov.state != "loading" else TEXT_DIM)
-            p.drawText(QtCore.QRectF(text_x, y, 120, HEIGHT),
+            p.drawText(QtCore.QRectF(text_x, y, label_w + 2.0, HEIGHT),
                        int(QtCore.Qt.AlignmentFlag.AlignVCenter
                            | QtCore.Qt.AlignmentFlag.AlignLeft), label)
 
-        meter_left = x + 128.0
-        meter_right = x + width - 18.0
+        # The bars start after whatever the label actually took, so a state with
+        # no word gives that space to the waveform rather than to padding.
+        meter_left = text_x + (label_w + METER_GAP if label_w else 0.0)
+        meter_right = x + width - RIGHT_INSET
         if meter_right - meter_left > 20.0:
             if ov.state in METERED_STATES:
                 self._draw_bars(p, meter_left, meter_right, cy, accent)
@@ -262,7 +313,7 @@ class PillWidget(QtWidgets.QWidget):
         span = right - left
         step = span / BARS
         w = min(BAR_W, step - BAR_GAP)
-        half = HEIGHT / 2.0 - 9.0
+        half = BAR_MAX_H / 2.0
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         hist = ov.history
         for i in range(BARS):
@@ -286,7 +337,7 @@ class PillWidget(QtWidgets.QWidget):
         for i in range(BARS):
             k = math.sin(phase - i * 0.38)
             v = 0.5 + 0.5 * k
-            h = max(BAR_MIN, (HEIGHT / 2.0 - 9.0) * 2.0 * (0.18 + 0.55 * v * v))
+            h = max(BAR_MIN, BAR_MAX_H * (0.18 + 0.55 * v * v))
             p.setBrush(QtGui.QColor(accent.red(), accent.green(), accent.blue(),
                                     70 + int(120 * v)))
             p.drawRoundedRect(QtCore.QRectF(left + i * step, cy - h / 2.0, w, h),
@@ -305,6 +356,10 @@ class Overlay:
         self.meter = 0.0
         self.expand = 0.0
         self.pill_width = float(COLLAPSED_W)
+        # The width the pill expands TO, which is per-state now. It glides so a
+        # change of state between two expanded widths animates instead of
+        # snapping; 0.0 means "not yet known", and the first expansion snaps.
+        self._expanded_w = 0.0
         self.history: collections.deque[float] = collections.deque(
             [0.0] * BARS, maxlen=BARS)
         self.widget: PillWidget | None = None
@@ -443,7 +498,16 @@ class Overlay:
             if abs(self.expand - target) <= 0.001:
                 self.expand = target
             self._dirty = True
-        width = _lerp(COLLAPSED_W, EXPANDED_W, _ease(self.expand))
+        if state in EXPANDED_STATES:
+            want_w = self.expanded_width_for(state)
+            if self._expanded_w <= 0.0:
+                self._expanded_w = want_w
+            elif abs(self._expanded_w - want_w) > 0.01:
+                self._expanded_w += (want_w - self._expanded_w) * EXPAND_RATE
+                self._dirty = True
+        elif self._expanded_w <= 0.0:
+            self._expanded_w = MIN_EXPANDED_W
+        width = _lerp(COLLAPSED_W, self._expanded_w, _ease(self.expand))
         if abs(width - self.pill_width) > 0.01:
             self.pill_width = width
             self._dirty = True
@@ -475,6 +539,13 @@ class Overlay:
         want_interval = IDLE_FRAME_MS if settled else FRAME_MS
         if self._timer.interval() != want_interval:
             self._timer.setInterval(want_interval)
+
+    def expanded_width_for(self, state: str) -> float:
+        """Width this state expands to. The widget owns it because only it has
+        the font, and the label's measured advance is what sets the width."""
+        if self.widget is not None:
+            return self.widget.width_for(state)
+        return expanded_width(state, 0.0)
 
     @staticmethod
     def _to_bar(rms: float) -> float:

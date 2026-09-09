@@ -22,6 +22,7 @@ case where a chord arrives before the model is ready.
 from __future__ import annotations
 
 import os
+import struct
 import sys
 import threading
 import time
@@ -36,7 +37,8 @@ from PySide6 import QtWidgets  # noqa: E402
 from shout.__main__ import Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
 from shout.gestures import Event  # noqa: E402
-from shout.overlay import COLLAPSED_W, EXPANDED_W, fullscreen_app_running, user32  # noqa: E402
+from shout.overlay import COLLAPSED_W, fullscreen_app_running, user32  # noqa: E402
+from shout.tray import CUE_LAB, cue_lab_exe  # noqa: E402
 
 rows: list[tuple[bool, str, str]] = []
 
@@ -112,9 +114,10 @@ def main() -> int:
             check(app._tray_state() == "loading",
                   "reports 'loading' until the model is ready",
                   app._tray_state())
-            check(abs(app.overlay.pill_width - EXPANDED_W) < 1.0,
+            want = app.overlay.expanded_width_for("loading")
+            check(abs(app.overlay.pill_width - want) < 1.0,
                   "expanded while loading, so a slow boot is visible",
-                  f"width={app.overlay.pill_width:.0f}")
+                  f"width={app.overlay.pill_width:.0f} want={want:.0f}")
 
             # Session 2 needed a non-daemon pystray thread beside Tk. Nothing
             # should own a thread of its own now. MainThread is non-daemon by
@@ -136,9 +139,10 @@ def main() -> int:
                   f"state={app._tray_state()}")
             check(app._tray_state() == "recording", "state is 'recording'",
                   app._tray_state())
-            check(abs(app.overlay.pill_width - EXPANDED_W) < 1.0,
+            want = app.overlay.expanded_width_for("recording")
+            check(abs(app.overlay.pill_width - want) < 1.0,
                   "expanded while recording",
-                  f"width={app.overlay.pill_width:.0f}")
+                  f"width={app.overlay.pill_width:.0f} want={want:.0f}")
             check(played[:1] == ["start"], "start cue fired on chord-down",
                   f"cues={played}")
 
@@ -203,6 +207,24 @@ def main() -> int:
 
     stage("main: building tray + overlay")
     app.tray.build()
+
+    # The tray is the only surface Shout has, so "can you reach the cue lab"
+    # is a real question about the app, not about a script. All three of these
+    # fail independently: a renamed menu entry, a moved script, and a launcher
+    # that would pop a console window (which is exactly how the app shipped
+    # before the 8 Sep trampoline fix).
+    labels = [a.text() for a in app.tray._menu.actions() if not a.isSeparator()]
+    check("Cue sounds..." in labels, "the tray menu can open the cue lab",
+          f"menu={labels}")
+    check(CUE_LAB.exists(), "the script that menu entry points at is really there",
+          str(CUE_LAB))
+    exe = Path(cue_lab_exe())
+    raw = exe.read_bytes()
+    subsystem = struct.unpack_from("<H", raw,
+                                   struct.unpack_from("<I", raw, 0x3c)[0] + 0x5c)[0]
+    check(subsystem == 2, "the lab opens windowed, with no console",
+          f"{exe.name} PE subsystem={subsystem} (2=GUI, 3=console)")
+
     app.overlay.build()
     stage("main: qapp.exec()")
     qapp.exec()                # blocks until _quit; this returning IS the test

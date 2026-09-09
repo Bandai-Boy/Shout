@@ -14,12 +14,48 @@ from __future__ import annotations
 
 import collections
 import logging
+import subprocess
+import sys
+from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 log = logging.getLogger(__name__)
 
 POLL_MS = 120
+
+CUE_LAB = Path(__file__).resolve().parent.parent / "scripts" / "cue_lab.py"
+
+# DETACHED_PROCESS: the lab outlives Shout and must not die with it, and must
+# not inherit a console it could pop open.
+_DETACHED = 0x00000008 | 0x00000200 | 0x08000000     # + NEW_PROCESS_GROUP, NO_WINDOW
+
+
+def cue_lab_exe() -> str:
+    """The GUI-subsystem interpreter, preferred over whatever launched us.
+
+    uv installed its CONSOLE trampoline as both python.exe and pythonw.exe on
+    this machine, so `sys.executable` opens a terminal when Shout was started
+    from one. `shoutw.exe` beside it is the real windowed launcher."""
+    windowed = Path(sys.executable).with_name("shoutw.exe")
+    return str(windowed if windowed.exists() else sys.executable)
+
+
+def launch_cue_lab() -> bool:
+    """Fire and forget. Never waited on — see the lab note about awaiting a
+    child's close with no timeout."""
+    if not CUE_LAB.exists():
+        log.error("cue lab not found at %s", CUE_LAB)
+        return False
+    try:
+        subprocess.Popen([cue_lab_exe(), str(CUE_LAB)], cwd=str(CUE_LAB.parent.parent),
+                         creationflags=_DETACHED, close_fds=True)
+        log.info("opened the cue lab (%s)", cue_lab_exe())
+        return True
+    except Exception:
+        log.exception("could not open the cue lab")
+        return False
+
 
 # state -> (fill, ring or None)
 _COLORS = {
@@ -71,6 +107,7 @@ class Tray:
         self._pending: collections.deque[tuple[str, str]] = collections.deque()
         self.icon: QtWidgets.QSystemTrayIcon | None = None
         self._menu: QtWidgets.QMenu | None = None
+        self.cue_action: QtGui.QAction | None = None
         self._timer: QtCore.QTimer | None = None
 
     # -- called from other threads (attribute rebind / deque append) --------
@@ -87,6 +124,12 @@ class Tray:
         self.icon = QtWidgets.QSystemTrayIcon(_icon("loading"))
         self.icon.setToolTip(_LABELS["loading"])
         menu = QtWidgets.QMenu()
+        # The tray is the only surface Shout has, so anything you might want to
+        # open has to be reachable from here — a script you have to remember the
+        # path of is not reachable.
+        self.cue_action = menu.addAction("Cue sounds...")
+        self.cue_action.triggered.connect(lambda _checked=False: launch_cue_lab())
+        menu.addSeparator()
         quit_action = menu.addAction("Quit Shout")
         quit_action.triggered.connect(lambda _checked=False: self._on_quit())
         # The menu must outlive this call; a QMenu with no Python reference is

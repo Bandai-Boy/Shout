@@ -35,7 +35,16 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 .venv/Scripts/python.exe scripts/bench.py                    # throughput benchmark
 .venv/Scripts/python.exe scripts/gpu_probe.py                # CUDA + compute-type smoke test
 .venv/Scripts/python.exe scripts/transcribe_meeting.py <file>  # meeting pipeline
+.venv/Scripts/shoutw.exe  scripts/cue_lab.py                 # audition the cue sounds
 ```
+
+Normally you never type that: **right-click the tray icon -> Cue sounds...**
+`shoutw.exe` for the lab, not `pythonw.exe` — see the 8 Sep lab note on uv's
+console trampoline. The lab drives `shout.cues.build()` directly and writes
+`cue_preset` / `cue_voice` / `cue_volume` into config.json, merging rather than
+rewriting. **Re-run `harness/probe_cues.py` after saving a new voice:** that gate
+reads the configured voice and asserts the cue stays inert in the transcript,
+which is a property of the sound, not of the code.
 
 ## Gotchas
 
@@ -199,3 +208,22 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   on through `tail`/`sort`/`wc`; redirect to a file and read the file. Related to
   the 2026-08-31 note about CLIs changing their output when piped, but a
   different mechanism: here the output was correct and simply withheld.
+
+- [2026-09-08] The pill's dimensions are DERIVED, not typed in. Height is the one
+  number; bar height, dot radius and halo are fractions of it, and the expanded
+  width is the sum of the parts a state actually draws (dot inset + label gap +
+  measured label + meter gap + 122px bar span + right inset). That is why
+  deleting the word "Recording" shortened the recording pill from 268 to 174px
+  by itself. Label widths come from `QFontMetrics` on the real font — never
+  estimate one, it picks the width and a wrong guess clips a word with nothing
+  to trace it to. The taskbar gap is height-independent for free: placement
+  derives the window top from its height, so the pill shrinks upward from a
+  fixed bottom edge. If you change HEIGHT, change nothing else.
+- [2026-09-08] `probe_cues` reads the CONFIGURED voice, not the default — its
+  band, note offsets and duration bounds are all derived from it. That is
+  deliberate: the property it protects (the cue is inert in the transcript)
+  belongs to the sound, so a gate pinned to the default would stay green while
+  the app played something the VAD might not reject. **Re-run it after every
+  save from the cue lab.** All six shipped presets are harmonic for the same
+  reason; a noisy one (Tick, anything breathy) can break the property, and the
+  failure is a stray word in your dictation, not a gate error.

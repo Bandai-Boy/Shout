@@ -31,7 +31,7 @@ from PySide6 import QtCore, QtWidgets
 
 from .audio import Recorder
 from .config import Config, config_dir
-from .cues import Cues
+from .cues import Cues, Voice
 from .gestures import Command, Gestures, State
 from .hotkey import HotkeyListener
 from .overlay import Overlay
@@ -69,7 +69,8 @@ class Shout:
         self.cfg = cfg
         self.recorder = Recorder(device=cfg.input_device, preroll_ms=cfg.preroll_ms)
         self.cues = Cues(enabled=cfg.cues, volume=cfg.cue_volume,
-                         device=cfg.output_device)
+                         device=cfg.output_device,
+                         voice=Voice.resolve(cfg.cue_preset, cfg.cue_voice))
         self.gestures = Gestures(cfg.tap_max_ms, cfg.latch_window_ms,
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)

@@ -37,12 +37,45 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shout.audio import Recorder
-from shout.cues import Cues, build
+from shout.config import Config
+from shout.cues import GESTURES, MAX_GESTURE_S, Cues, Voice, build, duration_s, notes
 
 RATE = 16000
-BAND = (550.0, 1450.0)      # spans the 660 / 990 / 1320 notes
 CONTROL_MIN_RATIO = 3.0     # below this the speakers are not reaching the mic
 BLEED_PRESENT_RATIO = 3.0   # above this the cue is genuinely in the recording
+
+# The gate tests the voice that is actually CONFIGURED, not the default. The
+# property it exists to protect — that the cue is inert in the transcript — is a
+# property of the sound, so a gate pinned to the default would go on passing
+# while the app played something the VAD might not reject.
+CFG = Config.load()
+VOICE = Voice.resolve(CFG.cue_preset, CFG.cue_voice)
+
+
+def band(voice: Voice = VOICE) -> tuple[float, float]:
+    """The band the cue's fundamentals live in, derived from the voice rather
+    than hardcoded — a deeper preset would fall out of a fixed window and the
+    bleed measurement would silently read as ambient."""
+    freqs = [f for name in GESTURES for f, _ in notes(name, voice)]
+    return min(freqs) * 0.7, max(freqs) * 1.4
+
+
+BAND = band()
+
+
+def note_slices(name: str, rate: int, voice: Voice = VOICE):
+    """(nominal Hz, start, end) per note. Measuring each note where it actually
+    is beats slicing a fixed number of milliseconds off each end, which a change
+    of note length silently invalidates."""
+    out, pos = [], 0
+    gap = int(rate * voice.gap_ms / 1000.0)
+    for i, (freq, seconds) in enumerate(notes(name, voice)):
+        if i:
+            pos += gap
+        n = max(1, int(rate * seconds))
+        out.append((freq, pos, pos + n))
+        pos += n
+    return out
 
 rows: list[tuple[bool, str, str]] = []
 
@@ -68,35 +101,65 @@ def dominant(audio: np.ndarray, rate: int) -> float:
 
 def waveform_checks() -> None:
     rate, vol = 48000, 0.25
+    print(f"  voice {VOICE.name!r}  root={VOICE.root_hz:.0f}Hz  decay={VOICE.decay}"
+          f"  bright={VOICE.bright}  length={VOICE.length}"
+          f"  band={BAND[0]:.0f}-{BAND[1]:.0f}Hz")
     for name in ("start", "stop", "latch"):
-        a = build(name, rate, vol)
+        a = build(name, rate, vol, VOICE)
         ms = len(a) / rate * 1000
-        check(60 <= ms <= 260, f"{name}: duration is a blip", f"{ms:.0f}ms")
+        check(ms <= MAX_GESTURE_S * 1000, f"{name}: duration is still a blip",
+              f"{ms:.0f}ms, ceiling {MAX_GESTURE_S * 1000:.0f}ms")
+        check(abs(ms - duration_s(name, VOICE) * 1000) < 1.0,
+              f"{name}: every note the voice describes is present",
+              f"{ms:.0f}ms built vs {duration_s(name, VOICE) * 1000:.0f}ms described")
         check(abs(a[0]) < 1e-6 and abs(a[-1]) < 1e-6,
               f"{name}: starts and ends at zero (no click)",
               f"first={a[0]:+.2e} last={a[-1]:+.2e}")
         check(np.max(np.abs(a)) <= vol + 1e-6, f"{name}: respects the volume setting",
               f"peak={np.max(np.abs(a)):.3f}")
+        # Each note is measured where the voice says it is, so a wrong root,
+        # a dropped note or a mis-scaled interval all show up as a pitch miss.
+        for freq, lo_i, hi_i in note_slices(name, rate):
+            got = dominant(a[lo_i:hi_i], rate)
+            tol = max(30.0, freq * 0.08)
+            check(abs(got - freq) <= tol, f"{name}: note at {freq:.0f}Hz is in tune",
+                  f"measured {got:.0f}Hz (tol +-{tol:.0f})")
         # A raw sine jumps to full amplitude in one sample; a faded one must not.
         head = int(rate * 0.002)
         check(np.max(np.abs(a[:head])) < vol * 0.7,
               f"{name}: fades in rather than jumping to full amplitude")
 
-    lo, hi = 0.05, 0.045
-    s = build("start", rate, vol)
-    st = build("stop", rate, vol)
-    la = build("latch", rate, vol)
-    first, last = int(rate * lo), int(rate * hi)
-    check(dominant(s[:first], rate) < dominant(s[-last:], rate),
-          "start rises in pitch",
-          f"{dominant(s[:first], rate):.0f}Hz -> {dominant(s[-last:], rate):.0f}Hz")
-    check(dominant(st[:first], rate) > dominant(st[-last:], rate),
-          "stop falls in pitch (the reverse of start)",
-          f"{dominant(st[:first], rate):.0f}Hz -> {dominant(st[-last:], rate):.0f}Hz")
-    check(dominant(la[-last:], rate) > dominant(s[-last:], rate),
+    # Direction, measured note by note rather than by slicing a fixed number of
+    # milliseconds off each end — a voice with longer notes or a decay envelope
+    # makes a fixed tail slice land in near-silence and read as noise.
+    def measured(name: str) -> list[float]:
+        a = build(name, rate, vol, VOICE)
+        return [dominant(a[lo_i:hi_i], rate) for _, lo_i, hi_i in note_slices(name, rate)]
+
+    s_n, st_n, la_n = measured("start"), measured("stop"), measured("latch")
+    check(s_n[0] < s_n[-1], "start rises in pitch",
+          f"{s_n[0]:.0f}Hz -> {s_n[-1]:.0f}Hz")
+    check(st_n[0] > st_n[-1], "stop falls in pitch (the reverse of start)",
+          f"{st_n[0]:.0f}Hz -> {st_n[-1]:.0f}Hz")
+    check(la_n[-1] > s_n[-1],
           "latch ends higher than start, so the three are distinguishable",
-          f"latch {dominant(la[-last:], rate):.0f}Hz vs start {dominant(s[-last:], rate):.0f}Hz")
-    check(len(la) > len(s), "latch is longer than start")
+          f"latch {la_n[-1]:.0f}Hz vs start {s_n[-1]:.0f}Hz")
+    check(len(build("latch", rate, vol, VOICE)) > len(build("start", rate, vol, VOICE)),
+          "latch is longer than start")
+
+    # Anchored on the voice's declared root and the gesture's declared ratio,
+    # NOT on notes() — the synth builds from notes() too, so a check that reads
+    # its expectation from there agrees with a broken notes() forever. Measured
+    # 8 Sep: detuning notes() by 20% slipped past every per-note check above and
+    # is caught by exactly these two rows.
+    check(abs(s_n[0] - VOICE.root_hz) <= max(30.0, VOICE.root_hz * 0.08),
+          "start's first note IS the voice's root",
+          f"measured {s_n[0]:.0f}Hz, voice says {VOICE.root_hz:.0f}Hz")
+    want_ratio = GESTURES["start"][1][0] ** VOICE.spread
+    got_ratio = s_n[-1] / max(1e-6, s_n[0])
+    check(abs(got_ratio - want_ratio) <= 0.08,
+          "the interval is the one the gesture declares",
+          f"measured {got_ratio:.3f}x, gesture says {want_ratio:.3f}x")
 
 
 def bleed_test(cues: Cues) -> str:
@@ -124,7 +187,8 @@ def bleed_test(cues: Cues) -> str:
     time.sleep(0.3)
     cue = capture("start", before=True)          # exactly what a chord press does
     time.sleep(0.3)
-    cues.samples["_ref"] = build("start", cues.rate, min(0.85, cues._volume * 3 + 0.4))
+    cues.samples["_ref"] = build("start", cues.rate,
+                                 min(0.85, cues._volume * 3 + 0.4), cues.voice)
     reference = capture("_ref")
     rec.close()
 
@@ -178,8 +242,9 @@ def bleed_test(cues: Cues) -> str:
 def main() -> int:
     waveform_checks()
 
-    cues = Cues(enabled=True, volume=0.25)
-    check(cues.enabled, "cue output stream opened", f"{cues.rate}Hz")
+    cues = Cues(enabled=True, volume=CFG.cue_volume, voice=VOICE)
+    check(cues.enabled, "cue output stream opened",
+          f"{cues.rate}Hz, voice {cues.voice.name!r} at volume {CFG.cue_volume}")
     for name in ("start", "stop", "latch"):
         check(name in cues.samples, f"{name}: preloaded, not read from disk on the hot path")
 
