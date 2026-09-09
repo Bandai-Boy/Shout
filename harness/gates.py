@@ -32,6 +32,7 @@ GATES = [
     ("cues", ROOT / "harness" / "probe_cues.py"),
     ("overlay", ROOT / "harness" / "probe_overlay.py"),
     ("app", ROOT / "harness" / "probe_app.py"),
+    ("repo", ROOT / "harness" / "probe_repo.py"),
 ]
 
 

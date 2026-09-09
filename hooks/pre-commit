@@ -1,0 +1,33 @@
+#!/bin/sh
+# Shim only. The guard is hooks/guard.py; this exists because git runs hooks
+# through sh and the real check wants a language with a path parser.
+#
+# Installed by pointing git at this directory rather than by copying into
+# .git/hooks, so the guard is version controlled and survives a clone:
+#
+#     git config core.hooksPath hooks
+#
+# The venv interpreter is preferred but not required — the guard is stdlib only,
+# so any python on PATH runs it. If none is found the commit is REFUSED rather
+# than allowed, because a guard that fails open is not a guard.
+set -e
+root=$(git rev-parse --show-toplevel)
+
+if [ ! -f "$root/hooks/guard.py" ]; then
+    echo "" >&2
+    echo "  COMMIT BLOCKED - hooks/guard.py is missing." >&2
+    echo "  The recording/transcript guard could not run, so this commit is refused." >&2
+    echo "  Restore it from git history rather than disabling the hook." >&2
+    echo "" >&2
+    exit 1
+fi
+
+for py in "$root/.venv/Scripts/python.exe" "$root/.venv/bin/python" python3 python; do
+    if command -v "$py" >/dev/null 2>&1; then
+        exec "$py" "$root/hooks/guard.py"
+    fi
+done
+
+echo "  COMMIT BLOCKED - no python found to run hooks/guard.py." >&2
+echo "  The recording/transcript guard could not run, so this commit is refused." >&2
+exit 1

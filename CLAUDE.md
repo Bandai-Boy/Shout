@@ -46,6 +46,23 @@ rewriting. **Re-run `harness/probe_cues.py` after saving a new voice:** that gat
 reads the configured voice and asserts the cue stays inert in the transcript,
 which is a property of the sound, not of the code.
 
+## Commit guard
+
+`hooks/pre-commit` refuses to commit recordings, transcript-shaped files, or any
+staged blob over 1MB. It is version controlled rather than living in `.git/`, so
+it is wired up with one command that **a fresh clone must run**:
+
+```bash
+git config core.hooksPath hooks
+```
+
+The gitignore is still the first line and still correct; the hook exists because
+a gitignore is passive — it does not stop `git add -f`, and it does not stop a
+recording that lands somewhere it was not expected. `harness/probe_repo.py`
+proves it blocks, in a throwaway repo, with both controls: ordinary source must
+still commit, and `audio/jfk.wav` must still be allowed. `--no-verify` skips it,
+as it skips every hook; this stops accidents, not authors.
+
 ## Gotchas
 
 - **`cuda_dlls.enable()` must be called before importing `ctranslate2` or
