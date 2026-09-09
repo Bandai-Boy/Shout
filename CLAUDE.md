@@ -40,11 +40,21 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 
 Normally you never type that: **right-click the tray icon -> Cue sounds...**
 `shoutw.exe` for the lab, not `pythonw.exe` — see the 8 Sep lab note on uv's
-console trampoline. The lab drives `shout.cues.build()` directly and writes
-`cue_preset` / `cue_voice` / `cue_volume` into config.json, merging rather than
-rewriting. **Re-run `harness/probe_cues.py` after saving a new voice:** that gate
-reads the configured voice and asserts the cue stays inert in the transcript,
-which is a property of the sound, not of the code.
+console trampoline. The lab drives `shout.cues.build()` directly and merges the
+cue keys into config.json rather than rewriting it.
+
+The six materials in `cues.PRESETS` are **read-only**. A voice you tune is saved
+under a name of its own into `cue_presets`, so the material stays as shipped and
+stays selectable; editing a material renames what you are editing, and saving
+under a material's name is refused. `Voice.resolve()` is the single place that
+turns config into a voice and the only thing both readers use — `__main__.py`
+and `probe_cues.py`. `harness/probe_lab.py` drives the real `Lab` against a
+throwaway `APPDATA` and asserts the round trip: what the lab played is what the
+app resolves.
+
+**Re-run `harness/probe_cues.py` after saving a new voice:** that gate reads the
+configured voice and asserts the cue stays inert in the transcript, which is a
+property of the sound, not of the code.
 
 ## Commit guard
 
@@ -244,3 +254,22 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   save from the cue lab.** All six shipped presets are harmonic for the same
   reason; a noisy one (Tick, anything breathy) can break the property, and the
   failure is a stray word in your dictation, not a gate error.
+
+- [2026-09-08] `probe_cues` reports **SKIPPED — control tone not heard** on this
+  box whenever the default input is the wireless *Headset Microphone* while cues
+  play out of *Speakers (Realtek)*: the two are not acoustically coupled, so the
+  loud reference tone measures 1.00x ambient and the gate correctly refuses to
+  claim the bleed assertions passed. That is the control working, not a
+  regression — a SKIPPED verdict means the inertness of the configured voice is
+  **unverified**, and 40/40 on the other rows does not cover it. To actually
+  close it, point `output_device` at the headset (or select a mic that can hear
+  the speakers) and re-run. Worth knowing before reading a SKIPPED as a pass.
+- [2026-09-08] The cue lab's Delete left `cue_preset` naming a voice it had just
+  removed, because it read the active name off `self.cfg` — a `Config` snapshot
+  taken in `__init__`, which goes stale the instant the window's own Save writes
+  the file. Caught by `probe_lab` on its first run. → In any editor window that
+  both reads and writes a config file, a snapshot is only good for the initial
+  render; every later question about what is CURRENTLY configured has to re-read
+  the file. `self.voice.name` was the other tempting answer and is also wrong —
+  deleting a voice you are merely *looking* at must leave the active one alone,
+  which is now its own gate row.

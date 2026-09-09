@@ -28,8 +28,10 @@ control heard with bleed present (assert it is inert).
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shout.audio import Recorder
 from shout.config import Config
-from shout.cues import GESTURES, MAX_GESTURE_S, Cues, Voice, build, duration_s, notes
+from shout.cues import (GESTURES, MAX_GESTURE_S, PRESETS, Cues, Voice, build,
+                        duration_s, notes)
 
 RATE = 16000
 CONTROL_MIN_RATIO = 3.0     # below this the speakers are not reaching the mic
@@ -49,7 +52,7 @@ BLEED_PRESENT_RATIO = 3.0   # above this the cue is genuinely in the recording
 # property of the sound, so a gate pinned to the default would go on passing
 # while the app played something the VAD might not reject.
 CFG = Config.load()
-VOICE = Voice.resolve(CFG.cue_preset, CFG.cue_voice)
+VOICE = Voice.resolve(CFG.cue_preset, CFG.cue_voice, CFG.cue_presets)
 
 
 def band(voice: Voice = VOICE) -> tuple[float, float]:
@@ -162,6 +165,57 @@ def waveform_checks() -> None:
           f"measured {got_ratio:.3f}x, gesture says {want_ratio:.3f}x")
 
 
+def resolution_checks() -> None:
+    """The voice the config DESCRIBES is the voice the app plays.
+
+    The lab saves a tuned voice under a name of its own rather than redefining
+    the material it came from, so `Voice.resolve` now has two sources to choose
+    between and a JSON round trip in the middle of one of them. Both are pure
+    logic, and both fail silently in the worst possible way — the app plays a
+    different sound than the one that was auditioned, and this gate's own
+    inertness assertions then measure the wrong sound.
+    """
+    tuned = replace(PRESETS["marimba"], name="probe voice", root_hz=369.0,
+                    decay=0.69, length=0.76)
+    stored = {k: v for k, v in asdict(tuned).items() if k != "name"}
+    # Through actual JSON, because that is where tuples become lists.
+    trip = Voice.from_saved("probe voice", json.loads(json.dumps(stored)))
+    check(trip == tuned, "a saved voice survives the JSON round trip unchanged",
+          "identical" if trip == tuned else f"{trip}")
+
+    # Control: the row above is only worth anything if it can see a field go
+    # missing. `partials` is the one at risk — it is part of a material's
+    # identity and is not a slider, so a lab that serialized only its knobs
+    # would drop it and every tuned voice would quietly revert to blip's timbre.
+    thin = {k: v for k, v in stored.items() if k != "partials"}
+    check(Voice.from_saved("probe voice", thin) != tuned,
+          "and would notice a dropped field (control)",
+          f"partials {Voice.from_saved('probe voice', thin).partials} "
+          f"vs {tuned.partials}")
+
+    check(Voice.resolve("probe voice", {}, {"probe voice": stored}) == tuned,
+          "resolve() finds a saved voice by name")
+    shadow = {"marimba": {"root_hz": 111.0}}
+    check(Voice.resolve("marimba", {}, shadow) == PRESETS["marimba"],
+          "a saved entry cannot shadow a built-in material",
+          f"root {Voice.resolve('marimba', {}, shadow).root_hz:.0f}Hz, "
+          f"material says {PRESETS['marimba'].root_hz:.0f}Hz")
+    check(Voice.resolve("probe voice", {"root_hz": 500.0},
+                        {"probe voice": stored}).root_hz == 500.0,
+          "overrides still layer on top (the pre-named-preset config path)")
+    check(Voice.resolve("no such voice", {}, {}) == PRESETS["blip"],
+          "an unknown name falls back to blip rather than raising")
+
+    # Anchored on the config file, not on what resolve() happens to return: a
+    # cue_preset naming neither a material nor a saved voice is a config that
+    # silently plays something else.
+    known = CFG.cue_preset in PRESETS or CFG.cue_preset in CFG.cue_presets
+    check(known, "the configured preset name exists",
+          f"{CFG.cue_preset!r} is "
+          + ("a material" if CFG.cue_preset in PRESETS else
+             "saved" if known else "MISSING — the app is playing blip instead"))
+
+
 def bleed_test(cues: Cues) -> str:
     """Returns 'clean', 'inert', 'fail', or a reason string for SKIPPED."""
     if not cues.enabled or cues._stream is None:
@@ -241,6 +295,7 @@ def bleed_test(cues: Cues) -> str:
 
 def main() -> int:
     waveform_checks()
+    resolution_checks()
 
     cues = Cues(enabled=True, volume=CFG.cue_volume, voice=VOICE)
     check(cues.enabled, "cue output stream opened",

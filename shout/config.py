@@ -47,6 +47,10 @@ class Config:
     # Both are what `scripts/cue_lab.py` writes when you save an audition.
     cue_preset: str = "blip"
     cue_voice: dict = field(default_factory=dict)
+    # Voices saved under a name of their own, name -> the voice's full field
+    # dict. `cue_preset` may name one of these instead of a built-in, which is
+    # how a tuned material survives without shadowing the material it came from.
+    cue_presets: dict = field(default_factory=dict)
     output_device: int | None = None  # None = system default
     overlay: bool = True             # the state pill above the taskbar
 

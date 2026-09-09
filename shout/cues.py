@@ -15,6 +15,10 @@ sustain, pure sine — so nothing changes until a voice is chosen. Audition them
 with `scripts/cue_lab.py`, which drives THIS module rather than its own copy of
 the synth, and writes the result to config.json.
 
+The six presets here are read-only materials. A voice tuned in the lab is saved
+under a name of its own into `cue_presets`, so the material it started from stays
+exactly as shipped and stays selectable — see `Voice.resolve`.
+
 Three decisions worth keeping:
 
 *Persistent output stream.* The cue IS the feedback, so it has to fire on
@@ -82,18 +86,40 @@ class Voice:
     partials: tuple[tuple[float, float], ...] = ((2.0, 0.50), (3.0, 0.25))
 
     @classmethod
-    def resolve(cls, preset: str = "blip", overrides: dict | None = None) -> "Voice":
-        """A named preset with optional per-field tweaks on top — which is what
-        the lab exports and what config.json stores."""
-        voice = PRESETS.get(preset, PRESETS["blip"])
-        if overrides:
-            known = {f for f in cls.__dataclass_fields__ if f != "name"}
-            clean = {k: v for k, v in overrides.items() if k in known}
-            if "partials" in clean:
-                clean["partials"] = tuple(tuple(p) for p in clean["partials"])
-            if clean:
-                voice = replace(voice, **clean)
-        return voice
+    def _clean(cls, data: dict) -> dict:
+        """Only fields this dataclass actually has, with `partials` coerced back
+        from the lists JSON hands us. Shared by both paths below, so a saved
+        voice and an override layer cannot disagree about what a field is."""
+        known = {f for f in cls.__dataclass_fields__ if f != "name"}
+        clean = {k: v for k, v in data.items() if k in known}
+        if "partials" in clean:
+            clean["partials"] = tuple(tuple(p) for p in clean["partials"])
+        return clean
+
+    @classmethod
+    def from_saved(cls, name: str, data: dict) -> "Voice":
+        """A complete voice the lab saved under a name of its own. Fields the
+        stored dict omits fall back to the defaults, so a hand-edited or older
+        entry still loads instead of raising."""
+        return replace(cls(name=name), **cls._clean(data))
+
+    @classmethod
+    def resolve(cls, preset: str = "blip", overrides: dict | None = None,
+                saved: dict | None = None) -> "Voice":
+        """The voice config.json describes. `preset` names either a built-in
+        material or one of the user's own voices in `saved`; `overrides` tweaks
+        individual fields on top of whichever it found.
+
+        A built-in name always wins over a saved one. The lab refuses to save
+        under a built-in name, and this line makes that structural rather than a
+        matter of the lab continuing to behave — a stray saved entry can never
+        quietly shadow a shipped material."""
+        if saved and preset in saved and preset not in PRESETS:
+            voice = cls.from_saved(preset, saved[preset])
+        else:
+            voice = PRESETS.get(preset, PRESETS["blip"])
+        clean = cls._clean(overrides or {})
+        return replace(voice, **clean) if clean else voice
 
 
 # Materials, not melodies: every preset plays the same three gestures. All are
@@ -202,8 +228,10 @@ class Cues:
                 )
                 self._stream.start()
                 self._channels = channels
-                log.info("cues ready at %dHz, %d channel(s), voice %r",
-                         self.rate, channels, self.voice.name)
+                log.info("cues ready at %dHz, %d channel(s), voice %r "
+                         "(root=%.0fHz decay=%.2f bright=%.2f length=%.2f)",
+                         self.rate, channels, self.voice.name, self.voice.root_hz,
+                         self.voice.decay, self.voice.bright, self.voice.length)
                 return
             except Exception:
                 self._stream = None

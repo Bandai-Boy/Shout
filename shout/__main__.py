@@ -70,7 +70,8 @@ class Shout:
         self.recorder = Recorder(device=cfg.input_device, preroll_ms=cfg.preroll_ms)
         self.cues = Cues(enabled=cfg.cues, volume=cfg.cue_volume,
                          device=cfg.output_device,
-                         voice=Voice.resolve(cfg.cue_preset, cfg.cue_voice))
+                         voice=Voice.resolve(cfg.cue_preset, cfg.cue_voice,
+                                             cfg.cue_presets))
         self.gestures = Gestures(cfg.tap_max_ms, cfg.latch_window_ms,
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)

@@ -1,4 +1,4 @@
-"""Audition the cue sounds and save the one you like.
+"""Audition the cue sounds and save the one you like, under a name of its own.
 
     .venv/Scripts/shoutw.exe scripts/cue_lab.py
 
@@ -9,6 +9,15 @@ pythonw would open a terminal window beside the lab. See the 8 Sep lab note.
 Pick a material, drag the sliders, hear it immediately. Nothing is written until
 you press Save, and Save only touches the cue keys in config.json — every other
 setting is left as it is.
+
+*The six materials are read-only.* Dragging a knob while one of them is selected
+renames what you are editing, so Save creates a NEW entry in the list rather than
+redefining the material you started from. That matters because the material is
+the thing you navigate by: if tuning `marimba` overwrote `marimba`, the list
+would slowly stop describing anything, and there would be no way back to the
+sound you liked last week. Your own saved voices ARE editable in place — saving
+over a name you created updates it, which is what editing your own work should
+do — and Delete removes one.
 
 Two things this is deliberately NOT:
 
@@ -34,14 +43,14 @@ The knobs, roughly in the order they matter for "less bright":
 
 After saving: quit Shout from the tray and relaunch it, then re-run
 `harness/probe_cues.py`. That gate asserts the cue does not change your
-transcript, and it is a property of the SOUND — every preset here is harmonic
+transcript, and it is a property of the SOUND — every material here is harmonic
 because the VAD rejects tones, and a noisy one could break it.
 """
 from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -110,14 +119,30 @@ class Lab(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle("Shout — cue lab")
         self.cfg = Config.load()
-        self.voice = Voice.resolve(self.cfg.cue_preset, self.cfg.cue_voice)
+        self.saved: dict[str, dict] = dict(self.cfg.cue_presets)
+        self.voice = Voice.resolve(self.cfg.cue_preset, self.cfg.cue_voice,
+                                   self.saved)
         self.volume = float(self.cfg.cue_volume)
         self.cues = Cues(enabled=True, volume=self.volume,
                          device=self.cfg.output_device, voice=self.voice)
         self._loading = False
         self._build_ui()
+        self._rebuild_list()
         self._sync_widgets()
         self._apply(play=None)
+        self._greet()
+
+    def _greet(self) -> None:
+        """A voice carried as overrides on a built-in predates named saving, and
+        reselecting that built-in would silently discard it. Say so on open
+        rather than letting the list quietly disagree with what is playing."""
+        n = len(Voice._clean(self.cfg.cue_voice))
+        if n and self.cfg.cue_preset in PRESETS:
+            self.name.setText(self._free_name(self.cfg.cue_preset))
+            self.status.setText(
+                f"Playing {self.cfg.cue_preset!r} with {n} tweak(s) that are not "
+                f"saved under a name — Save to keep them as "
+                f"{self.name.text()!r}, or rename first.")
 
     # -- ui ------------------------------------------------------------------
 
@@ -128,7 +153,6 @@ class Lab(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("Material"))
         self.preset = QtWidgets.QComboBox()
-        self.preset.addItems(list(PRESETS))
         self.preset.currentTextChanged.connect(self._on_preset)
         top.addWidget(self.preset, 1)
         self.auto = QtWidgets.QCheckBox("Play on change")
@@ -175,6 +199,21 @@ class Lab(QtWidgets.QWidget):
         play.addWidget(seq)
         outer.addLayout(play)
 
+        named = QtWidgets.QHBoxLayout()
+        named.addWidget(QtWidgets.QLabel("Save as"))
+        self.name = QtWidgets.QLineEdit()
+        self.name.setMaxLength(40)
+        self.name.setPlaceholderText("a name for this voice")
+        named.addWidget(self.name, 1)
+        self.delete = QtWidgets.QPushButton("Delete")
+        self.delete.clicked.connect(self._delete)
+        named.addWidget(self.delete)
+        save = QtWidgets.QPushButton("Save to config")
+        save.setDefault(True)
+        save.clicked.connect(self._save)
+        named.addWidget(save)
+        outer.addLayout(named)
+
         actions = QtWidgets.QHBoxLayout()
         self.status = QtWidgets.QLabel("")
         self.status.setWordWrap(True)
@@ -183,13 +222,22 @@ class Lab(QtWidgets.QWidget):
         revert = QtWidgets.QPushButton("Revert")
         revert.clicked.connect(self._revert)
         actions.addWidget(revert)
-        save = QtWidgets.QPushButton("Save to config")
-        save.setDefault(True)
-        save.clicked.connect(self._save)
-        actions.addWidget(save)
         outer.addLayout(actions)
 
-        self.resize(560, 460)
+        self.resize(580, 500)
+
+    def _rebuild_list(self) -> None:
+        """Materials first, then your own voices under a separator. Rebuilt
+        rather than appended to, so a delete cannot leave a stale row."""
+        self._loading = True
+        try:
+            self.preset.clear()
+            self.preset.addItems(list(PRESETS))
+            if self.saved:
+                self.preset.insertSeparator(self.preset.count())
+                self.preset.addItems(sorted(self.saved))
+        finally:
+            self._loading = False
 
     # -- slider <-> voice ----------------------------------------------------
 
@@ -207,6 +255,7 @@ class Lab(QtWidgets.QWidget):
         try:
             i = self.preset.findText(self.voice.name)
             self.preset.setCurrentIndex(i if i >= 0 else 0)
+            self.name.setText(self.voice.name)
             for fieldname, _, lo, hi, _dp in KNOBS:
                 value = getattr(self.voice, fieldname)
                 self.sliders[fieldname].setValue(self._to_slider(value, lo, hi))
@@ -214,6 +263,7 @@ class Lab(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._label_values()
+        self.delete.setEnabled(self.voice.name in self.saved)
 
     def _label_values(self) -> None:
         for fieldname, _, _lo, _hi, dp in KNOBS:
@@ -226,20 +276,48 @@ class Lab(QtWidgets.QWidget):
         self.voice = replace(self.voice, **fields)
         self.volume = self._from_slider(self.sliders["_volume"].value(), 0.0, 1.0)
 
+    def _differs_from(self, base: Voice) -> bool:
+        """A knob counts as moved only if it moved by more than one slider step.
+        Reading a slider back gives a quantized value, so an exact comparison
+        calls knobs you never dragged moved."""
+        for fieldname, _, lo, hi, _dp in KNOBS:
+            if abs(getattr(self.voice, fieldname) - getattr(base, fieldname)) \
+                    > (hi - lo) / STEPS:
+                return True
+        return self.voice.partials != base.partials
+
+    def _free_name(self, base: str) -> str:
+        taken = set(PRESETS) | set(self.saved)
+        for n in range(2, 100):
+            if (candidate := f"{base} {n}") not in taken:
+                return candidate
+        return f"{base} copy"
+
     # -- events --------------------------------------------------------------
 
+    def _load_named(self, name: str) -> Voice:
+        return (Voice.from_saved(name, self.saved[name]) if name in self.saved
+                and name not in PRESETS else PRESETS[name])
+
     def _on_preset(self, name: str) -> None:
-        if self._loading:
+        if self._loading or not name:
             return
-        self.voice = PRESETS[name]
+        self.voice = self._load_named(name)
         self._sync_widgets()
         self._apply(play="start")
+        self.status.setText("")
 
     def _on_slider(self) -> None:
         if self._loading:
             return
         self._read_widgets()
         self._label_values()
+        # Editing a material renames what you are editing, so Save adds an entry
+        # instead of redefining a shipped sound. Only while the box still holds
+        # the material's own name — once it is your name, it stays yours.
+        if self.name.text().strip() in PRESETS and self._differs_from(
+                PRESETS[self.name.text().strip()]):
+            self.name.setText(self._free_name(self.name.text().strip()))
         self._apply(play="start" if self.auto.isChecked() else None)
 
     def _apply(self, play: str | None) -> None:
@@ -271,40 +349,96 @@ class Lab(QtWidgets.QWidget):
 
     def _revert(self) -> None:
         self.cfg = Config.load()
-        self.voice = Voice.resolve(self.cfg.cue_preset, self.cfg.cue_voice)
+        self.saved = dict(self.cfg.cue_presets)
+        self.voice = Voice.resolve(self.cfg.cue_preset, self.cfg.cue_voice,
+                                   self.saved)
         self.volume = float(self.cfg.cue_volume)
+        self._rebuild_list()
         self._sync_widgets()
         self._apply(play="start")
         self.status.setText("Reverted to what is saved.")
 
-    def _save(self) -> None:
+    # -- persistence ---------------------------------------------------------
+
+    def _read(self) -> dict:
+        """The file, raw. `self.cfg` is a snapshot from construction and goes
+        stale the moment Save writes — so any question about what is CURRENTLY
+        configured has to be asked of the file. Caught by probe_lab on its first
+        run: Delete read the active preset off the snapshot and left config.json
+        naming a voice it had just removed."""
+        path = config_dir() / "config.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write(self, keys: dict) -> Path:
         """Merge into config.json rather than rewriting it — the file may hold
         settings this window knows nothing about, and Config.save() would write
         this process's defaults over every one of them."""
-        base = PRESETS[self.preset.currentText()]
-        # A knob counts as touched only if it moved by more than one slider step.
-        # Reading a slider back gives a quantized value, so an exact comparison
-        # records knobs you never dragged as overrides and the saved preset stops
-        # meaning what it says.
-        overrides = {}
-        for fieldname, _, lo, hi, _dp in KNOBS:
-            value, was = getattr(self.voice, fieldname), getattr(base, fieldname)
-            if abs(value - was) > (hi - lo) / STEPS:
-                overrides[fieldname] = round(value, 4)
         path = config_dir() / "config.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, json.JSONDecodeError):
-            raw = {}
-        raw.update({"cue_preset": base.name, "cue_voice": overrides,
-                    "cue_volume": round(self.volume, 3)})
+        raw = self._read()
+        raw.update(keys)
         path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        return path
+
+    def _voice_dict(self) -> dict:
+        """The whole voice, not a diff against a material. `partials` is in here
+        and is not a slider: a voice tuned out of marimba needs marimba's
+        partials or it will not sound like the thing you tuned."""
+        data = {k: v for k, v in asdict(self.voice).items() if k != "name"}
+        return {k: (round(v, 4) if isinstance(v, float) else v)
+                for k, v in data.items()}
+
+    def _save(self) -> None:
+        name = self.name.text().strip()
+        if not name:
+            self.status.setText("Give the voice a name first.")
+            return
+        if name in PRESETS:
+            if self._differs_from(PRESETS[name]):
+                self.name.setText(self._free_name(name))
+                self.status.setText(
+                    f"{name!r} is a built-in material and is not redefinable. "
+                    f"Renamed to {self.name.text()!r} — press Save again.")
+                return
+            keys = {"cue_preset": name, "cue_voice": {},
+                    "cue_volume": round(self.volume, 3)}
+            what = f"material {name!r}"
+        else:
+            existed = name in self.saved
+            self.saved[name] = self._voice_dict()
+            keys = {"cue_preset": name, "cue_voice": {},
+                    "cue_presets": self.saved,
+                    "cue_volume": round(self.volume, 3)}
+            what = f"{name!r} ({'updated' if existed else 'new'})"
+        path = self._write(keys)
+        self.voice = replace(self.voice, name=name)
+        self._rebuild_list()
+        self._sync_widgets()
         self.status.setText(
-            f"Saved {base.name!r}"
-            + (f" +{len(overrides)} tweak(s)" if overrides else "")
-            + f" to {path}. Quit Shout from the tray and relaunch it, "
-              f"then re-run harness/probe_cues.py.")
+            f"Saved {what} to {path}. Quit Shout from the tray and relaunch it, "
+            f"then re-run harness/probe_cues.py.")
+
+    def _delete(self) -> None:
+        name = self.voice.name
+        if name not in self.saved:
+            self.status.setText("Only your own saved voices can be deleted.")
+            return
+        del self.saved[name]
+        keys = {"cue_presets": self.saved}
+        # Not `self.voice.name`: deleting a voice you are merely LOOKING at must
+        # leave the active one alone, and not `self.cfg` either — see _read.
+        if self._read().get("cue_preset") == name:
+            keys |= {"cue_preset": "blip", "cue_voice": {}}
+        self._write(keys)
+        self.cfg = Config.load()
+        self.voice = PRESETS["blip"]
+        self._rebuild_list()
+        self._sync_widgets()
+        self._apply(play="start")
+        self.status.setText(f"Deleted {name!r}. Now on 'blip'.")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.cues.close()
