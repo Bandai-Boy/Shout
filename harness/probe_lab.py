@@ -20,14 +20,17 @@ back to a sound you liked. That is asserted from both directions — editing a
 material renames what you are editing, and saving under a material's name with
 changes is refused.
 
-The widget is constructed but never shown. It is an ordinary activating window,
-so showing it would steal focus from whatever is in front, and nothing here needs
-it mapped — Qt lays out and measures a hidden widget perfectly well.
+The widget is mapped with `WA_DontShowOnScreen`, which runs the real layout
+without ever creating a visible window — this is an ordinary activating window,
+so a plain `show()` would steal focus from whatever is in front. Layout
+assertions need that mapping: an unmapped widget reports every child invisible,
+so a "nothing is clipped" sweep over it passes by measuring nothing.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -41,7 +44,7 @@ TMP = Path(tempfile.mkdtemp(prefix="shout_lab_"))
 os.environ["APPDATA"] = str(TMP)
 CONFIG = TMP / "Shout" / "config.json"
 
-from PySide6 import QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtWidgets  # noqa: E402
 
 from shout.config import Config  # noqa: E402
 from shout.cues import PRESETS, Voice  # noqa: E402
@@ -83,11 +86,74 @@ def as_app_sees_it() -> Voice:
     return Voice.resolve(cfg.cue_preset, cfg.cue_voice, cfg.cue_presets)
 
 
+def contrast(fg: str, bg: tuple[float, float, float]) -> float:
+    def chan(v: float) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    def lum(c) -> float:
+        r, g, b = (chan(x) for x in c)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    c = fg.lstrip("#")
+    a, b = lum(tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))), lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def style_checks() -> None:
+    """Two things the window's look depends on that no screenshot review catches
+    reliably, and one that a screenshot cannot measure at all."""
+    C, QSS = cue_lab.C, cue_lab.QSS
+
+    # A state written BEFORE its subcontrol is silently misparsed by Qt: the
+    # declarations land on the widget instead. `QSlider:focus::handle:horizontal`
+    # painted a 1px border around every slider, focused or not, which read as a
+    # grid drawn over the knobs. Bisected 8 Sep; this is the general form.
+    # Comments first: the QSS carries a comment naming the misparsed selector,
+    # and a lint that reads its own explanation of a bug reports the bug forever.
+    live = re.sub(r"/\*.*?\*/", "", QSS, flags=re.S)
+    bad = re.findall(r"Q\w+(?:#\w+)?:[a-z-]+::[\w-]+", live)
+    check(not bad, "no QSS selector puts a state before its subcontrol",
+          f"offenders: {bad}" if bad else "state follows subcontrol throughout")
+
+    for selector in ("QComboBox:focus", "QLineEdit:focus", "QPushButton:focus",
+                     "QSlider::handle:horizontal:focus"):
+        check(selector in QSS, f"{selector} keeps a visible focus ring")
+
+    # Contrast, against every background this window actually composites: the
+    # base, the base under its lightest blob, a translucent card over that, and
+    # the input surface. Light text is worst off over the LIGHTEST of those.
+    def over(fg, alpha, bg):
+        return tuple(alpha * f + (1 - alpha) * b for f, b in zip(fg, bg))
+
+    deep = (0x1a, 0x0f, 0x2e)
+    blob = over((100, 60, 180), 0.20, deep)
+    tiers = {"base": deep, "under blob": blob,
+             "card fill": over((255, 255, 255), 0.06, blob),
+             "input surface": (0x3d, 0x22, 0x66)}
+    for role in ("text", "label", "negative"):
+        worst = min(tiers, key=lambda t: contrast(C[role], tiers[t]))
+        ratio = contrast(C[role], tiers[worst])
+        check(ratio >= 4.5, f"{role} text ({C[role]}) clears AA on every surface",
+              f"worst is {worst} at {ratio:.2f}:1")
+    # Control: the check must be able to fail. VV's own --vv-text-muted is the
+    # token this palette had to reject, so it is the honest negative case.
+    muted = max(contrast("#8a6f5a", bg) for bg in tiers.values())
+    check(muted < 4.5, "and would reject VV's own #8a6f5a muted token (control)",
+          f"best case {muted:.2f}:1, below the 4.5 floor everywhere")
+    check(C["disabled"] == "#8a6f5a",
+          "which therefore survives only as the disabled colour")
+
+
 def main() -> int:
+    style_checks()
     write_config(LEGACY)
     app = QtWidgets.QApplication(sys.argv[:1])
     lab = cue_lab.Lab()
     lab.cues.play = lambda *_a, **_k: None      # audition silently
+    lab.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    lab.show()
+    app.processEvents()
 
     # -- opening on a legacy config ------------------------------------------
     check(abs(lab.voice.root_hz - 369.45) < 0.01,
@@ -194,6 +260,45 @@ def main() -> int:
     check("Only your own" in lab.status.text(),
           "a material cannot be deleted even if the button is forced",
           lab.status.text()[:60])
+
+    # Layout, measured rather than eyeballed. A screenshot cannot show this: at
+    # 736px tall every label rendered 4-5px under its own minimum, which is
+    # legible at this DPI and clips at another.
+    def squeezed(w=lab):
+        return [(c.objectName() or type(c).__name__, c.height(),
+                 c.minimumSizeHint().height())
+                for c in w.findChildren(QtWidgets.QWidget)
+                if c.isVisible() and c.minimumSizeHint().height() > 0
+                and c.height() < c.minimumSizeHint().height()]
+
+    check(not squeezed(), "no widget is squeezed below its minimum at the default size",
+          f"{lab.width()}x{lab.height()}, layout minimum "
+          f"{lab.minimumSizeHint().width()}x{lab.minimumSizeHint().height()}")
+    tall = lab.height()
+    lab.resize(lab.width(), 736)
+    app.processEvents()
+    check(lab.height() >= lab.minimumSizeHint().height(),
+          "and the window cannot be dragged below that minimum",
+          f"asked for 736, Qt clamped to {lab.height()}")
+    # Control: with the floor explicitly lifted -- the only way to get under it --
+    # the same sweep must report the clipping that 736px actually causes.
+    # Without this the row above passes on a sweep that can no longer see
+    # anything, which is how the first version of this gate was wrong.
+    # setFixedHeight, not setMinimumSize(0,0): clearing the minimum does not
+    # stick, because the layout re-imposes its own on the next activation --
+    # which is exactly why the row above holds for the user, and why the first
+    # attempt at this control silently measured a window still 840px tall.
+    lab.setFixedHeight(736)
+    app.processEvents()
+    check(len(squeezed()) > 0, "and the sweep detects clipping when it happens (control)",
+          f"{len(squeezed())} widgets clipped at 736px tall")
+    lab.setMinimumSize(0, 0)
+    lab.setMaximumSize(16777215, 16777215)
+    lab.resize(lab.width(), tall)
+    app.processEvents()
+    check(lab.minimumSizeHint().height() <= 900,
+          "the layout minimum still fits a 1080p screen",
+          f"minimum height {lab.minimumSizeHint().height()}px")
 
     lab.cues.close()
     app.quit()

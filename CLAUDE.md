@@ -273,3 +273,30 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   the file. `self.voice.name` was the other tempting answer and is also wrong —
   deleting a voice you are merely *looking* at must leave the active one alone,
   which is now its own gate row.
+- [2026-09-08] Restyled the cue lab to the Vendor Vault design language (Ember
+  Dusk). Three Qt-specific findings, all found by measuring rather than looking.
+  (1) **`QSlider:focus::handle:horizontal` is MISPARSED by Qt** — the form the
+  docs imply, state before subcontrol, silently applies its declarations to the
+  QSlider WIDGET, so a `border` there paints a box around every slider whether
+  focused or not; stacked over eight rows it reads as a grid drawn on the panel.
+  `QSlider::handle:horizontal:focus` is correct. `probe_lab` now lints the whole
+  sheet for state-before-subcontrol — and its first version failed on the
+  COMMENT that explains the bug, so it strips `/* */` before matching.
+  (2) **A screenshot cannot see a window sized under its layout minimum.** At
+  600x736 the lab looked perfect and twenty widgets were rendering 4-5px under
+  their `minimumSizeHint` — legible at this DPI, clipping at another. Size a
+  window FROM `sizeHint()`, never from a number that looked right, and sweep
+  `child.height() < child.minimumSizeHint().height()` with the window mapped
+  (`WA_DontShowOnScreen` + `show()`; an unmapped widget reports every child
+  invisible, so the sweep passes by measuring nothing). Qt clamps a top-level to
+  its layout minimum, which is why the control for that sweep needs
+  `setFixedHeight` — `setMinimumSize(0,0)` does not stick, the layout re-imposes
+  its own minimum on the next activation.
+  (3) **VV's `--vv-text-muted` (#8a6f5a) fails WCAG AA on every surface here**
+  (2.78-3.91:1) and `--vv-negative` fails on card fills. Ran the contrast sweep
+  before writing any colour down, per the 2026-08-21 rule; labels use
+  `--vv-text-secondary` instead and #8a6f5a survives only as the disabled colour.
+  The gate asserts the floor with VV's own token as the negative control.
+  Not verified: the combo popup's styling — `view().grab()` returns blank
+  because the view only renders as a real popup, and showing one would put it on
+  the user's desktop.
