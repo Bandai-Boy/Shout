@@ -116,9 +116,9 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 
 ```powershell
 uv sync                                     # the environment, plus dev tools
+git config core.hooksPath hooks             # turn on the commit guard (the repo gate checks it)
 .venv\Scripts\python.exe -m shout           # run from a terminal; it logs to the console too
 .venv\Scripts\python.exe harness\gates.py   # the full test suite
-git config core.hooksPath hooks             # turn on the commit guard
 ```
 
 **Quit Shout before running the gates.** They send a real Ctrl+Win, and a running Shout would take that as dictation.

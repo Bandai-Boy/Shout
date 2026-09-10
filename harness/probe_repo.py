@@ -134,7 +134,8 @@ def main() -> int:
     configured = subprocess.run(["git", "config", "core.hooksPath"], cwd=ROOT,
                                 capture_output=True, text=True).stdout.strip()
     check(configured == "hooks", "the real repo points git at hooks/",
-          f"core.hooksPath={configured!r}")
+          f"core.hooksPath={configured!r}" + ("" if configured == "hooks" else
+          "  (a fresh clone needs: git config core.hooksPath hooks)"))
     check((HOOKS / "pre-commit").exists() and (HOOKS / "guard.py").exists(),
           "both hook files are present and tracked")
 
