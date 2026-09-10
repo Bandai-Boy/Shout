@@ -93,7 +93,8 @@ def main() -> int:
     check(not leaked, "control: a plain write is NOT marked private")
 
     if original is not None:
-        inj.set_clipboard_text(original, private=False)
+        # Private: the probe cannot know whether what it borrowed was a password.
+        inj.set_clipboard_text(original, private=True)
         check(inj.get_clipboard_text() == original, "previous clipboard restored")
     else:
         check(True, "previous clipboard was empty/non-text", "nothing to restore")
