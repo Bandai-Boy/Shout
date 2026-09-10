@@ -20,6 +20,16 @@ back to a sound you liked. That is asserted from both directions — editing a
 material renames what you are editing, and saving under a material's name with
 changes is refused.
 
+Then the two halves of "Save does what it says". The sliders: a click on the
+track jumps there, and a drag auditions once, on release, rather than once per
+value change. That stacked restarts of the cue into a screech. The drag row
+carries a precondition that the drag really moved the slider, because "no plays
+during the drag" passes just as well on a drag that never happened. And the app:
+a real `Shout`, built from the same throwaway config and left running, must be
+playing the lab's saved voice within a poll or two, with no restart. That was
+missing entirely until 10 Sep. The lab wrote the file and the app only read it
+at launch, so Save looked like it did nothing.
+
 The widget is mapped with `WA_DontShowOnScreen`, which runs the real layout
 without ever creating a visible window — this is an ordinary activating window,
 so a plain `show()` would steal focus from whatever is in front. Layout
@@ -33,7 +43,10 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -44,8 +57,9 @@ TMP = Path(tempfile.mkdtemp(prefix="shout_lab_"))
 os.environ["APPDATA"] = str(TMP)
 CONFIG = TMP / "Shout" / "config.json"
 
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
+from shout.__main__ import CONFIG_POLL_MS, Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
 from shout.cues import PRESETS, Voice  # noqa: E402
 
@@ -78,6 +92,48 @@ def write_config(data: dict) -> None:
 
 def read_config() -> dict:
     return json.loads(CONFIG.read_text(encoding="utf-8"))
+
+
+E = QtCore.QEvent.Type
+LEFT, NOBUTTON = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton
+
+
+def mouse(widget, kind, x: float, button, buttons) -> None:
+    """A real QMouseEvent sent straight to the widget, so nothing moves the
+    user's actual cursor."""
+    pos = QtCore.QPointF(x, widget.height() / 2.0)
+    QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
+        kind, pos, widget.mapToGlobal(pos), button, buttons,
+        QtCore.Qt.KeyboardModifier.NoModifier))
+
+
+def drag(widget, x0: float, x1: float, steps: int = 25) -> None:
+    mouse(widget, E.MouseButtonPress, x0, LEFT, LEFT)
+    for i in range(1, steps + 1):
+        mouse(widget, E.MouseMove, x0 + (x1 - x0) * i / steps, NOBUTTON, LEFT)
+
+
+def release(widget, x: float) -> None:
+    mouse(widget, E.MouseButtonRelease, x, LEFT, NOBUTTON)
+
+
+def pump(app, seconds: float, until=lambda: False) -> float | None:
+    """Run the event loop for up to `seconds`; the elapsed time once `until`
+    holds, else None."""
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < seconds:
+        app.processEvents()
+        if until():
+            return time.perf_counter() - t0
+        time.sleep(0.01)
+    return None
+
+
+def same_sound(a: np.ndarray, b: np.ndarray) -> bool:
+    """Within 1% of peak, sample for sample. Not exact: Save rounds the voice to
+    4 decimals and the volume to 3."""
+    return len(a) == len(b) and float(np.max(np.abs(a - b))) <= 0.01 * float(
+        np.max(np.abs(b)))
 
 
 def as_app_sees_it() -> Voice:
@@ -148,9 +204,10 @@ def style_checks() -> None:
 def main() -> int:
     style_checks()
     write_config(LEGACY)
-    app = QtWidgets.QApplication(sys.argv[:1])
+    app = cue_lab.application(sys.argv[:1])
     lab = cue_lab.Lab()
-    lab.cues.play = lambda *_a, **_k: None      # audition silently
+    plays: list[str] = []
+    lab.cues.play = lambda name, *_a, **_k: plays.append(name)  # count, silently
     lab.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     lab.show()
     app.processEvents()
@@ -261,6 +318,136 @@ def main() -> int:
           "a material cannot be deleted even if the button is forced",
           lab.status.text()[:60])
 
+    # -- sliders: jump to the click, audition on release ---------------------
+    steps = cue_lab.STEPS
+    lab.auto.setChecked(True)
+    lab.preset.setCurrentText("soft")
+    s = lab.sliders["decay"]                    # range 0..1, so value/steps IS decay
+    s.setValue(200)
+    plays.clear()
+    x = 0.8 * s.width()
+    mouse(s, E.MouseButtonPress, x, LEFT, LEFT)
+    on_press = len(plays)
+    release(s, x)
+    check(abs(s.value() - 0.8 * steps) <= 0.03 * steps,
+          "a click on the track jumps the handle to the click",
+          f"clicked at 80% of {s.width()}px: 200 -> {s.value()}")
+    check(on_press == 0 and plays == ["start"],
+          "and auditions once, on release rather than on press",
+          f"{on_press} play(s) on press, {len(plays)} after release")
+    # Control: the same click, same sheet, on the stock widget the lab used to
+    # have. It must only page toward the click, or the row above measures a
+    # jump that any slider would have made.
+    stock = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+    stock.setRange(0, steps)
+    stock.setValue(200)
+    stock.setStyleSheet(cue_lab.QSS)
+    stock.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    stock.resize(s.width(), s.height())
+    stock.show()
+    app.processEvents()
+    mouse(stock, E.MouseButtonPress, 0.8 * stock.width(), LEFT, LEFT)
+    release(stock, 0.8 * stock.width())
+    check(stock.value() == 200 + stock.pageStep(),
+          "where a stock QSlider under the same sheet only steps toward it (control)",
+          f"200 -> {stock.value()}, pageStep {stock.pageStep()}")
+    stock.close()
+
+    # From a fixed value, not wherever the click above left it: on the pre-fix
+    # code that was 210, and a drag from there to 20% moved four steps.
+    s.setValue(round(0.8 * steps))
+    changes: list[int] = []
+    on_change = changes.append
+    s.valueChanged.connect(on_change)
+    plays.clear()
+    start = s.value()
+    x0, x1 = s.width() * start / steps, 0.2 * s.width()
+    before_label = lab.values["decay"].text()
+    drag(s, x0, x1)
+    during, mid_label, mid_synth = len(plays), lab.values["decay"].text(), \
+        lab.cues.voice.decay
+    release(s, x1)
+    check(start - s.value() > 0.4 * steps and len(changes) >= 20,
+          "precondition: the drag really moved the slider",
+          f"{len(changes)} value changes, {start} -> {s.value()}")
+    check(during == 0, "dragging does not audition on every step (the screech)",
+          f"{during} play(s) across {len(changes)} value changes")
+    check(mid_label != before_label and mid_label == f"{s.value() / steps:.2f}"
+          and abs(mid_synth - s.value() / steps) < 1e-9,
+          "mid-drag, the readout and the synth already follow the knob",
+          f"label {before_label} -> {mid_label}, synth decay {mid_synth:.3f}")
+    check(plays == ["start"] and abs(lab.cues.voice.decay - s.value() / steps) < 1e-9,
+          "letting go auditions exactly once, as the knob now reads",
+          f"{len(plays)} play(s), decay {lab.cues.voice.decay:.3f}")
+
+    lab.auto.setChecked(False)
+    plays.clear()
+    was = s.value()
+    drag(s, 0.2 * s.width(), 0.6 * s.width())
+    release(s, 0.6 * s.width())
+    check(not plays and s.value() != was,
+          "with Play on change off, a drag stays silent",
+          f"{was} -> {s.value()}, {len(plays)} play(s)")
+    lab.auto.setChecked(True)
+
+    plays.clear()
+    for _ in range(3):
+        QtWidgets.QApplication.sendEvent(s, QtGui.QKeyEvent(
+            E.KeyPress, QtCore.Qt.Key.Key_Right, QtCore.Qt.KeyboardModifier.NoModifier))
+    check(len(plays) == 3, "arrow keys still audition every step",
+          f"{len(plays)} play(s) for 3 key presses")
+    s.valueChanged.disconnect(on_change)
+
+    # -- the running app follows Save -----------------------------------------
+    # A real Shout on the same throwaway config, started the way run() starts
+    # it. Nothing is pressed and its cues are never played.
+    shout = Shout(Config.load())
+    shout.watch_config()
+    lab.preset.setCurrentText("glass")
+    lab.sliders["root_hz"].setValue(lab.sliders["root_hz"].value() - 90)
+    lab.name.setText("follow me")
+    # Wait out the first poll, which reads the file whatever its stamp. A Save
+    # before it would pass the row below on a watch that only ever reads once.
+    pump(app, 3.0, lambda: shout._config_stamp is not None)
+    before, was_named = shout.cues.samples["start"].copy(), shout.cues.voice.name
+    lab._save()
+    took = pump(app, 3.0, lambda: shout.cues.voice.name == "follow me")
+    check(took is not None and took < 1.5,
+          "a RUNNING app switches to a voice the lab saves, with no restart",
+          f"{was_named!r} -> {shout.cues.voice.name!r} after {took * 1000:.0f}ms, "
+          f"polling every {CONFIG_POLL_MS}ms" if took is not None else
+          f"still {shout.cues.voice.name!r} after 3s")
+    heard, auditioned = shout.cues.samples["start"], lab.cues.samples["start"]
+    check(shout.cues.rate == lab.cues.rate and same_sound(heard, auditioned),
+          "and plays exactly what the lab auditioned",
+          f"{len(heard)} vs {len(auditioned)} samples at {shout.cues.rate}Hz")
+    check(not same_sound(before, auditioned),
+          "which the same comparison tells apart from its old voice (control)",
+          f"old voice {was_named!r}: {len(before)} samples")
+
+    # A file caught mid-write. Config.load() reads it as all defaults, which is
+    # a reset to 'blip' at 0.25 in the middle of your day.
+    full = CONFIG.read_bytes()
+    raw = read_config() | {"cue_volume": 0.3}
+    whole = json.dumps(raw, indent=2).encode("utf-8")
+    CONFIG.write_bytes(whole[:len(whole) // 2])
+    pump(app, 3 * CONFIG_POLL_MS / 1000)
+    check(shout.cues.voice.name == "follow me" and shout._cue_settings[1] != 0.25,
+          "a half-written config.json leaves the running app's voice alone",
+          f"{shout.cues.voice.name!r} at {shout._cue_settings[1]:.2f} after "
+          f"3 polls of a truncated file")
+    check(Config.load().cue_preset == "blip",
+          "and that file is one Config.load() reads as defaults (control)",
+          f"Config.load() on it -> {Config.load().cue_preset!r}")
+    CONFIG.write_bytes(whole)
+    took = pump(app, 3.0, lambda: shout._cue_settings[1] == 0.3)
+    check(took is not None, "and the app picks the file up once it is whole",
+          f"volume -> {shout._cue_settings[1]:.2f}")
+    CONFIG.write_bytes(full)
+    pump(app, 3.0, lambda: shout._cue_settings[1] != 0.3)
+    shout._config_timer.stop()
+    shout.cues.close()
+
     # Layout, measured rather than eyeballed. A screenshot cannot show this: at
     # 736px tall every label rendered 4-5px under its own minimum, which is
     # legible at this DPI and clips at another.
@@ -273,7 +460,8 @@ def main() -> int:
 
     check(not squeezed(), "no widget is squeezed below its minimum at the default size",
           f"{lab.width()}x{lab.height()}, layout minimum "
-          f"{lab.minimumSizeHint().width()}x{lab.minimumSizeHint().height()}")
+          f"{lab.minimumSizeHint().width()}x{lab.minimumSizeHint().height()}"
+          + (f", squeezed: {squeezed()}" if squeezed() else ""))
     tall = lab.height()
     lab.resize(lab.width(), 736)
     app.processEvents()
@@ -307,7 +495,7 @@ def main() -> int:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if detail else ""))
     passed = sum(ok for ok, _, _ in rows)
     print(f"{'FAIL' if passed != len(rows) else 'PASS'} {passed}/{len(rows)} "
-          f"cue lab assertions; lab -> config.json -> Voice round trip verified")
+          f"cue lab assertions; lab -> config.json -> running app verified")
     return 0 if passed == len(rows) else 1
 
 

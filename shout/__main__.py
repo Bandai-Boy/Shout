@@ -3,8 +3,9 @@
     python -m shout
 
 Threading model:
-    main        Qt event loop. The overlay and the tray both live here — Qt
-                objects may only be touched from the thread that created them
+    main        Qt event loop. The overlay, the tray and the config.json watch
+                all live here — Qt objects may only be touched from the thread
+                that created them
     hook        pynput WH_KEYBOARD_LL callback — enqueue and return, nothing else
     worker      drains the queue, runs the gesture machine, starts/stops capture
     watchdog    20ms poll: ticks, missed key-ups, dead-hook detection
@@ -43,6 +44,7 @@ log = logging.getLogger("shout")
 SAMPLE_RATE = 16000
 MIN_AUDIO_S = 0.25
 MUTEX_NAME = "Global\\ShoutDictationSingleInstance"
+CONFIG_POLL_MS = 500
 
 
 def _setup_logging(level: str) -> None:
@@ -68,10 +70,14 @@ class Shout:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.recorder = Recorder(device=cfg.input_device, preroll_ms=cfg.preroll_ms)
+        voice = Voice.resolve(cfg.cue_preset, cfg.cue_voice, cfg.cue_presets)
         self.cues = Cues(enabled=cfg.cues, volume=cfg.cue_volume,
-                         device=cfg.output_device,
-                         voice=Voice.resolve(cfg.cue_preset, cfg.cue_voice,
-                                             cfg.cue_presets))
+                         device=cfg.output_device, voice=voice)
+        # What the cues were last set to, and the mtime of the file that said
+        # so. See _follow_config.
+        self._cue_settings = (voice, float(cfg.cue_volume))
+        self._config_stamp: int | None = None
+        self._config_timer: QtCore.QTimer | None = None
         self.gestures = Gestures(cfg.tap_max_ms, cfg.latch_window_ms,
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)
@@ -176,6 +182,45 @@ class Shout:
                 return
             self.commits.submit(self._finish, audio, time.perf_counter())
 
+    # -- config ------------------------------------------------------------
+
+    def watch_config(self) -> None:
+        """Follow the cue settings in config.json while running, so a voice saved
+        in the cue lab plays from the next chord rather than the next launch.
+        Only the cue keys: the rest of the file (the model, the mic mode) cannot
+        change under a live process without a restart anyway."""
+        self._config_timer = QtCore.QTimer()
+        self._config_timer.timeout.connect(self._follow_config)
+        self._config_timer.start(CONFIG_POLL_MS)
+
+    def _follow_config(self) -> None:
+        """A stat per tick, and a read only when the mtime moves. Polled rather
+        than a QFileSystemWatcher, which stops watching a file that is deleted
+        and recreated, the way many editors save. A file caught mid-write does
+        not parse, so it is skipped WITHOUT recording its stamp and read again
+        next tick: Config.load() would have returned the defaults there, and put
+        every cue back to 'blip' until the next save."""
+        path = config_dir() / "config.json"
+        try:
+            stamp = path.stat().st_mtime_ns
+            if stamp == self._config_stamp:
+                return
+            cfg = Config.read()
+        except (OSError, ValueError):
+            return
+        first_look = self._config_stamp is None
+        self._config_stamp = stamp
+        settings = (Voice.resolve(cfg.cue_preset, cfg.cue_voice, cfg.cue_presets),
+                    float(cfg.cue_volume))
+        if settings != self._cue_settings:
+            self._cue_settings = settings
+            self.cues.set_volume(settings[1])
+            self.cues.set_voice(settings[0])
+        elif first_look:
+            return                  # the file main() just read; not a change
+        log.info("config.json changed; cues are %r at volume %.2f",
+                 settings[0].name, settings[1])
+
     # -- transcribe + inject ------------------------------------------------
 
     def _finish(self, audio, t_commit: float) -> None:
@@ -209,6 +254,7 @@ class Shout:
     def run(self, app: QtWidgets.QApplication) -> None:
         self.tray.build()
         self.overlay.build()
+        self.watch_config()
         threading.Thread(target=self._load_model, name="model", daemon=True).start()
         self.recorder.arm()
         self.hotkey.start()

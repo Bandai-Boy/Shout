@@ -255,8 +255,10 @@ class Cues:
                         for name in GESTURES}
 
     def set_voice(self, voice: Voice) -> None:
-        """Re-synthesize in place. Used by the lab, which is auditioning; the app
-        builds once and never calls this."""
+        """Re-synthesize in place. Used by the lab while auditioning, and by the
+        app when config.json changes. Safe against a concurrent play(): the new
+        samples replace the old dict in one rebind, so a cue fired meanwhile
+        plays one voice or the other, never a mix."""
         self.voice = voice
         self._cursor = (None, 0)
         self._render()

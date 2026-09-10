@@ -41,7 +41,9 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 Normally you never type that: **right-click the tray icon -> Cue sounds...**
 `shoutw.exe` for the lab, not `pythonw.exe` — see the 8 Sep lab note on uv's
 console trampoline. The lab drives `shout.cues.build()` directly and merges the
-cue keys into config.json rather than rewriting it.
+cue keys into config.json rather than rewriting it. A running Shout polls that
+file every 500ms and follows the **cue keys only**, so a Save plays from the
+next chord with no restart; every other key still needs a relaunch.
 
 The six materials in `cues.PRESETS` are **read-only**. A voice you tune is saved
 under a name of its own into `cue_presets`, so the material stays as shipped and
@@ -332,3 +334,32 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   by PID must report `os.getpid()` itself (empty BASELINE rows were the tell);
   and the per-app audio PropertyStore in the registry holds an entry for every
   exe that ever played anywhere (375 here), so its entries are not overrides.
+
+- [2026-09-10] Three cue-lab bugs, one of them a missing feature. (1) **Save
+  "did nothing"**: it wrote `cue_preset` correctly, but `Shout.__init__`
+  resolved the voice once and never re-read the file, while the lab's status
+  line told Gabe to relaunch, which nobody reads. The log showed the app still on
+  the old voice 20 minutes after the save. Now `watch_config()` polls the mtime
+  on the GUI thread and re-applies the cue keys. It uses `Config.read()`, not
+  `load()`: a file caught mid-write reads as all defaults under `load()`, and
+  the control that swaps it back put the running app on 'blip' at 0.25. (2) **A
+  click on a slider stepped 1%**, and whether a QSlider jumps is a property of
+  the STYLE: `SH_Slider_AbsoluteSetButtons` is Left under Qt's default
+  `windows11` style and Middle under Fusion, which the lab sets. `probe_lab` had
+  been building its own bare QApplication, so it ran on windows11 and would
+  have passed a jump the real lab never made. Caught by an in-probe control, a
+  stock QSlider under the same sheet, which jumped too. Now
+  `cue_lab.application()` builds the app for both. The same mismatch means the
+  layout sweep had been measuring windows11 geometry, not the lab's.
+  (3) **The drag screech**: valueChanged per pixel, and `Cues.play()` restarts
+  by design. `Slider.held` gates the audition to one play on release. It has to
+  be a flag set before the press is handled: the jump emits valueChanged from
+  inside the press, before `sliderPressed`, so `isSliderDown()` is still False
+  there. Smaller: a status message that wraps to a THIRD line does not grow the
+  window (the top-level minimum ignores heightForWidth), so the slider card
+  loses 15px. That was pre-existing; it surfaced because the new rows left a
+  long temp path on screen. The save message no longer carries the path, but a
+  40-character voice name can still reach three lines. -> Before asserting
+  anything about widget BEHAVIOUR in a probe, check that the probe builds the
+  app the way `main()` does. I had read both and not connected them, and it was
+  the stock-widget control that paid for it.

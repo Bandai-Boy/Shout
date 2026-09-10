@@ -64,13 +64,20 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
+        try:
+            return cls.read()
+        except (OSError, json.JSONDecodeError):
+            return cls()
+
+    @classmethod
+    def read(cls) -> "Config":
+        """load() without the fallback to defaults. A file caught mid-write does
+        not parse, and a caller that already holds a config should keep it
+        rather than put every setting back to its default for that moment."""
         path = config_dir() / "config.json"
         if not path.exists():
             return cls()
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return cls()
+        raw = json.loads(path.read_text(encoding="utf-8"))
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in raw.items() if k in known})
 

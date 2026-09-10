@@ -6,9 +6,9 @@
 names on this machine (PE subsystem 3, byte-identical to python.exe), so
 pythonw would open a terminal window beside the lab. See the 8 Sep lab note.
 
-Pick a material, drag the sliders, hear it immediately. Nothing is written until
-you press Save, and Save only touches the cue keys in config.json — every other
-setting is left as it is.
+Pick a material, drag a slider, hear it the moment you let go. Nothing is written
+until you press Save, and Save only touches the cue keys in config.json — every
+other setting is left as it is.
 
 *The six materials are read-only.* Dragging a knob while one of them is selected
 renames what you are editing, so Save creates a NEW entry in the list rather than
@@ -28,7 +28,7 @@ shape of bug as a warmup that runs different code from the real path.
 
 *Not a restart loop.* Auditioning by editing constants and restarting Shout costs
 about fifteen seconds a try, which is far too slow to converge on taste; here a
-slider move re-synthesizes and plays in a few milliseconds.
+slider re-synthesizes as it moves and plays in a few milliseconds once let go.
 
 The knobs, roughly in the order they matter for "less bright":
 
@@ -41,7 +41,8 @@ The knobs, roughly in the order they matter for "less bright":
     Spread      how far apart the two notes are. Below 1 the interval narrows.
     Gap         silence between notes; what makes a blip read as two notes.
 
-After saving: quit Shout from the tray and relaunch it, then re-run
+Save takes effect in the running app within about half a second — Shout watches
+config.json — so there is nothing to restart. Then re-run
 `harness/probe_cues.py`. That gate asserts the cue does not change your
 transcript, and it is a property of the SOUND — every material here is harmonic
 because the VAD rejects tones, and a noisy one could break it.
@@ -347,6 +348,57 @@ class Combo(QtWidgets.QComboBox):
         p.end()
 
 
+class JumpToClick(QtWidgets.QProxyStyle):
+    """Qt jumps a slider to the click only for the buttons this hint names,
+    which is the middle button out of the box. The left button pages toward the
+    click instead, one pageStep per press: 1% of the range here."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QtWidgets.QStyle.StyleHint.SH_Slider_AbsoluteSetButtons:
+            return QtCore.Qt.MouseButton.LeftButton.value
+        return super().styleHint(hint, option, widget, returnData)
+
+
+class Slider(QtWidgets.QSlider):
+    """Two things a stock QSlider gets wrong for auditioning.
+
+    A click on the track steps toward the click instead of going there. With
+    the proxy style it jumps, and the same press carries on as a drag, which is
+    Qt's own path for the middle button.
+
+    And a drag emits valueChanged for every pixel. Each one restarted the cue,
+    which `Cues.play()` does by design, so a drag stacked dozens of restarts
+    into a screech. `held` says a mouse gesture is in progress, and `settled`
+    fires once when it ends, if the value moved."""
+
+    settled = QtCore.Signal()
+
+    def __init__(self) -> None:
+        super().__init__(QtCore.Qt.Orientation.Horizontal)
+        # Per slider rather than app-wide, so the behaviour belongs to the widget
+        # whoever built the QApplication (probe_lab builds its own). The proxy
+        # wraps a fresh copy of the app's style, so the look does not change;
+        # setStyle does not take ownership, hence the attribute.
+        self._style = JumpToClick(QtWidgets.QApplication.style().name())
+        self.setStyle(self._style)
+        self.held = False
+        self._from = 0
+
+    def mousePressEvent(self, e: QtGui.QMouseEvent) -> None:
+        # Set BEFORE Qt handles the press: the jump emits valueChanged from
+        # inside it, ahead of sliderPressed, so isSliderDown() is still False.
+        self.held = e.button() == QtCore.Qt.MouseButton.LeftButton
+        self._from = self.value()
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e: QtGui.QMouseEvent) -> None:
+        super().mouseReleaseEvent(e)
+        if self.held:
+            self.held = False
+            if self.value() != self._from:
+                self.settled.emit()
+
+
 class StatTile(QtWidgets.QFrame):
     """VV's stat tile: a small card with a MANDATORY glowing left accent bar. The
     glow is three widening translucent strokes rather than a blur — cheaper than
@@ -553,7 +605,7 @@ class Lab(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout()
         grid.setVerticalSpacing(6)
         grid.setHorizontalSpacing(14)
-        self.sliders: dict[str, QtWidgets.QSlider] = {}
+        self.sliders: dict[str, Slider] = {}
         self.values: dict[str, QtWidgets.QLabel] = {}
         rows = KNOBS + [("_volume", "Volume", 0.0, 1.0, 2)]
         for row_i, (fieldname, label, lo, hi, dp) in enumerate(rows):
@@ -561,11 +613,12 @@ class Lab(QtWidgets.QWidget):
             caption.setObjectName("knob")
             caption.setFont(tracked(8.5))
             grid.addWidget(caption, row_i, 0)
-            s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+            s = Slider()
             s.setRange(0, STEPS)
             s.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             s.setAccessibleName(label)
             s.valueChanged.connect(self._on_slider)
+            s.settled.connect(self._on_settled)
             grid.addWidget(s, row_i, 1)
             v = QtWidgets.QLabel()
             v.setObjectName("value")
@@ -737,7 +790,15 @@ class Lab(QtWidgets.QWidget):
         if self.name.text().strip() in PRESETS and self._differs_from(
                 PRESETS[self.name.text().strip()]):
             self.name.setText(self._free_name(self.name.text().strip()))
-        self._apply(play="start" if self.auto.isChecked() else None)
+        # Mid-drag the wave, the readouts and the synth all follow the knob; only
+        # the audition waits for the release. Keys still play on every step.
+        dragging = any(s.held for s in self.sliders.values())
+        self._apply(play="start" if self.auto.isChecked() and not dragging
+                    else None)
+
+    def _on_settled(self) -> None:
+        if self.auto.isChecked():
+            self._play("start")
 
     def _apply(self, play: str | None) -> None:
         self.cues.set_volume(self.volume)
@@ -836,13 +897,15 @@ class Lab(QtWidgets.QWidget):
                     "cue_presets": self.saved,
                     "cue_volume": round(self.volume, 3)}
             what = f"{name!r} ({'updated' if existed else 'new'})"
-        path = self._write(keys)
+        self._write(keys)
         self.voice = replace(self.voice, name=name)
         self._rebuild_list()
         self._sync_widgets()
+        # No path in here: a long one wraps this to a third line, which the
+        # window does not grow for, and the slider card pays the 15px.
         self.status.setText(
-            f"Saved {what} to {path}. Quit Shout from the tray and relaunch it, "
-            f"then re-run harness/probe_cues.py.")
+            f"Saved {what}. Shout plays it from your next dictation, no restart "
+            f"needed. Then re-run harness/probe_cues.py.")
 
     def _delete(self) -> None:
         name = self.voice.name
@@ -868,9 +931,18 @@ class Lab(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
-def main() -> int:
-    app = QtWidgets.QApplication(sys.argv)
+def application(argv: list[str]) -> QtWidgets.QApplication:
+    """The QApplication as the lab runs it, and as probe_lab builds it too. The
+    style decides how a slider takes a click: Windows 11's jumps to it, Fusion's
+    steps toward it. So a gate left on the default style passed a jump the lab
+    never made."""
+    app = QtWidgets.QApplication(argv)
     app.setStyle("Fusion")
+    return app
+
+
+def main() -> int:
+    app = application(sys.argv)
     lab = Lab()
     lab.show()
     return app.exec()
