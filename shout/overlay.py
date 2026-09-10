@@ -81,7 +81,13 @@ _set_long.restype = ctypes.c_ssize_t
 # -- geometry ----------------------------------------------------------------
 
 HEIGHT = 31
-COLLAPSED_W = 78
+# The idle pill is its own shape, not a narrower expanded one: it is on screen
+# all day, so it should be a sliver, while the states you actually look at keep
+# their full height. Height grows with the same eased curve as width, from a
+# fixed bottom edge, so the sliver swells upward into the recording pill.
+COLLAPSED_W = 52
+COLLAPSED_H = 10
+IDLE_DOT_R = 0.0        # 0 = the idle pill carries no dot at all
 MARGIN_Y = 14           # gap between the pill and the top of the taskbar
 SHADOW = 10             # painted margin around the pill for the drop shadow
 
@@ -96,7 +102,7 @@ LABEL_GAP = 14.0        # dot centre -> start of the label
 METER_GAP = 12.0        # end of the label -> start of the bars
 METER_W = 122.0         # span of the bar row; unchanged, so waveform density is
 RIGHT_INSET = 18.0
-MIN_EXPANDED_W = COLLAPSED_W + 20.0   # below this, expanding is not legible
+MIN_EXPANDED_W = 98.0   # below this, expanding is not legible
 MAX_PILL_W = 268.0      # window capacity; derived widths are clamped to it
 
 # The window is always the largest it can get, so it never resizes while
@@ -114,15 +120,18 @@ IDLE_FRAME_MS = 33
 
 # -- palette -----------------------------------------------------------------
 
-BG = QtGui.QColor(20, 20, 26, 236)
+# Noir: every neutral here is exactly R == G == B. The body used to be
+# (20, 20, 26) with a steel-blue idle dot, which read as a blue pill; the state
+# colours below are the only hue left, so they are the only thing that speaks.
+BG = QtGui.QColor(0, 0, 0, 236)
 BORDER = QtGui.QColor(255, 255, 255, 26)
-TEXT = QtGui.QColor(240, 240, 244)
-TEXT_DIM = QtGui.QColor(240, 240, 244, 130)
+TEXT = QtGui.QColor(255, 255, 255)
+TEXT_DIM = QtGui.QColor(255, 255, 255, 130)
 METER_BG = QtGui.QColor(255, 255, 255, 28)
 
 ACCENT = {
-    "loading": QtGui.QColor(150, 150, 162),
-    "idle": QtGui.QColor(96, 126, 168),
+    "loading": QtGui.QColor(150, 150, 150),
+    "idle": QtGui.QColor(210, 210, 210),
     "recording": QtGui.QColor(228, 68, 68),
     "latched": QtGui.QColor(255, 202, 60),
     "working": QtGui.QColor(235, 168, 50),
@@ -229,10 +238,11 @@ class PillWidget(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
 
         width = ov.pill_width
+        height = ov.pill_height
         x = (WIN_W - width) / 2.0
-        y = float(SHADOW)
-        r = HEIGHT / 2.0
-        body = QtCore.QRectF(x, y, width, HEIGHT)
+        y = float(SHADOW + HEIGHT) - height     # bottom edge never moves
+        r = height / 2.0
+        body = QtCore.QRectF(x, y, width, height)
 
         # Soft shadow: a few progressively larger, fainter rounded rects. Cheaper
         # per frame than a QGraphicsDropShadowEffect, which re-renders the widget
@@ -251,13 +261,15 @@ class PillWidget(QtWidgets.QWidget):
         p.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), r, r)
 
         accent = ACCENT.get(ov.state, ACCENT["idle"])
-        cy = y + HEIGHT / 2.0
+        cy = y + height / 2.0
+        grown = _ease(ov.expand)
 
         # Centred while collapsed, sliding to a fixed inset as the pill grows.
         # Pinning it to the left edge outright leaves it visibly off-centre in
         # the resting lozenge, which is the shape that is on screen all day.
-        dot_x = x + _lerp(COLLAPSED_W / 2.0, DOT_INSET, _ease(self._ov.expand))
-        dot_r = DOT_R
+        dot_x = x + _lerp(COLLAPSED_W / 2.0, DOT_INSET, grown)
+        # The dot grows in from IDLE_DOT_R, which may be nothing at all.
+        dot_r = _lerp(IDLE_DOT_R, DOT_R, grown)
         if ov.state in METERED_STATES:
             # A halo scaled by input level: visible confirmation that it is
             # hearing you, which survives being seen out of the corner of an eye.
@@ -267,8 +279,9 @@ class PillWidget(QtWidgets.QWidget):
             halo = dot_r + HALO_R * ov.meter
             p.setBrush(QtGui.QColor(accent.red(), accent.green(), accent.blue(), 60))
             p.drawEllipse(QtCore.QPointF(dot_x, cy), halo, halo)
-        p.setBrush(accent)
-        p.drawEllipse(QtCore.QPointF(dot_x, cy), dot_r, dot_r)
+        if dot_r >= 0.3:
+            p.setBrush(accent)
+            p.drawEllipse(QtCore.QPointF(dot_x, cy), dot_r, dot_r)
 
         if ov.expand <= 0.02:
             p.end()
@@ -288,7 +301,7 @@ class PillWidget(QtWidgets.QWidget):
         if label:
             p.setFont(self._font)
             p.setPen(TEXT if ov.state != "loading" else TEXT_DIM)
-            p.drawText(QtCore.QRectF(text_x, y, label_w + 2.0, HEIGHT),
+            p.drawText(QtCore.QRectF(text_x, y, label_w + 2.0, height),
                        int(QtCore.Qt.AlignmentFlag.AlignVCenter
                            | QtCore.Qt.AlignmentFlag.AlignLeft), label)
 
@@ -296,15 +309,18 @@ class PillWidget(QtWidgets.QWidget):
         # no word gives that space to the waveform rather than to padding.
         meter_left = text_x + (label_w + METER_GAP if label_w else 0.0)
         meter_right = x + width - RIGHT_INSET
+        # Bars scale with the pill's current height, so they never stand proud
+        # of a body that is still swelling up from the idle sliver.
+        bar_max = BAR_MAX_H * height / HEIGHT
         if meter_right - meter_left > 20.0:
             if ov.state in METERED_STATES:
-                self._draw_bars(p, meter_left, meter_right, cy, accent)
+                self._draw_bars(p, meter_left, meter_right, cy, accent, bar_max)
             elif ov.state == "working":
-                self._draw_working(p, meter_left, meter_right, cy, accent)
+                self._draw_working(p, meter_left, meter_right, cy, accent, bar_max)
         p.end()
 
     def _draw_bars(self, p: QtGui.QPainter, left: float, right: float,
-                   cy: float, accent: QtGui.QColor) -> None:
+                   cy: float, accent: QtGui.QColor, bar_max: float) -> None:
         """Mirrored bars, oldest at the left. A scrolling history rather than a
         single number is what makes it read as a waveform — one bar rising and
         falling reads as a VU meter, which says far less about whether the words
@@ -313,7 +329,7 @@ class PillWidget(QtWidgets.QWidget):
         span = right - left
         step = span / BARS
         w = min(BAR_W, step - BAR_GAP)
-        half = BAR_MAX_H / 2.0
+        half = bar_max / 2.0
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         hist = ov.history
         for i in range(BARS):
@@ -326,7 +342,7 @@ class PillWidget(QtWidgets.QWidget):
                               w / 2.0, w / 2.0)
 
     def _draw_working(self, p: QtGui.QPainter, left: float, right: float,
-                      cy: float, accent: QtGui.QColor) -> None:
+                      cy: float, accent: QtGui.QColor, bar_max: float) -> None:
         """An indeterminate travelling wave. Nothing is being heard while the
         model runs, so showing a level here would be a lie about the microphone."""
         span = right - left
@@ -337,7 +353,7 @@ class PillWidget(QtWidgets.QWidget):
         for i in range(BARS):
             k = math.sin(phase - i * 0.38)
             v = 0.5 + 0.5 * k
-            h = max(BAR_MIN, BAR_MAX_H * (0.18 + 0.55 * v * v))
+            h = max(BAR_MIN, bar_max * (0.18 + 0.55 * v * v))
             p.setBrush(QtGui.QColor(accent.red(), accent.green(), accent.blue(),
                                     70 + int(120 * v)))
             p.drawRoundedRect(QtCore.QRectF(left + i * step, cy - h / 2.0, w, h),
@@ -356,6 +372,7 @@ class Overlay:
         self.meter = 0.0
         self.expand = 0.0
         self.pill_width = float(COLLAPSED_W)
+        self.pill_height = float(COLLAPSED_H)
         # The width the pill expands TO, which is per-state now. It glides so a
         # change of state between two expanded widths animates instead of
         # snapping; 0.0 means "not yet known", and the first expansion snaps.
@@ -508,8 +525,10 @@ class Overlay:
         elif self._expanded_w <= 0.0:
             self._expanded_w = MIN_EXPANDED_W
         width = _lerp(COLLAPSED_W, self._expanded_w, _ease(self.expand))
-        if abs(width - self.pill_width) > 0.01:
+        height = _lerp(COLLAPSED_H, HEIGHT, _ease(self.expand))
+        if abs(width - self.pill_width) > 0.01 or abs(height - self.pill_height) > 0.01:
             self.pill_width = width
+            self.pill_height = height
             self._dirty = True
 
         # -- level ----------------------------------------------------------

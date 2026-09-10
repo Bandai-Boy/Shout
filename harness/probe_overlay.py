@@ -27,8 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from shout.overlay import (BAR_MAX_H, COLLAPSED_W, DOT_INSET, GA_ROOT,  # noqa: E402
-                           GWL_EXSTYLE, HEIGHT, LABEL_GAP, MAX_PILL_W,
+import shout.overlay as overlay_mod  # noqa: E402
+from shout.overlay import (BAR_MAX_H, COLLAPSED_H, COLLAPSED_W, DOT_INSET,  # noqa: E402
+                           GA_ROOT, GWL_EXSTYLE, HEIGHT, LABEL_GAP, MAX_PILL_W,
                            METER_GAP, METER_W, MARGIN_Y, RIGHT_INSET, SHADOW,
                            WANTED_EXSTYLE, WIN_H, WIN_W, WS_EX_NOACTIVATE,
                            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, Overlay,
@@ -69,6 +70,37 @@ def rect(hwnd: int) -> wintypes.RECT:
 
 def visible(hwnd: int) -> bool:
     return bool(user32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+GREY = QtGui.QColor(128, 128, 128)
+
+
+def render(ov: Overlay) -> QtGui.QImage:
+    """The window as the painter draws it, over opaque neutral grey. Grey can
+    carry no hue of its own, so any tint read off the result is the pill's."""
+    img = QtGui.QImage(WIN_W, WIN_H, QtGui.QImage.Format.Format_ARGB32)
+    img.fill(GREY)
+    ov.widget.render(img, QtCore.QPoint(0, 0), QtGui.QRegion(),
+                     QtWidgets.QWidget.RenderFlag.DrawChildren)
+    return img
+
+
+def body_rows(img: QtGui.QImage) -> list[int]:
+    """Rows of the centre column the pill covers, measured off the pixels. The
+    shadow darkens the grey by ~15 at most; the body, dot and bars all differ
+    from it by far more than 40."""
+    x = WIN_W // 2
+    out = []
+    for y in range(WIN_H):
+        c = img.pixelColor(x, y)
+        if max(abs(c.red() - 128), abs(c.green() - 128), abs(c.blue() - 128)) > 40:
+            out.append(y)
+    return out
+
+
+def tint(img: QtGui.QImage, x: int, y: int) -> int:
+    c = img.pixelColor(x, y)
+    return max(c.red(), c.green(), c.blue()) - min(c.red(), c.green(), c.blue())
 
 
 def control_steals_focus() -> bool:
@@ -165,20 +197,54 @@ def main() -> int:
     spin(0.9)
     check(abs(ov.pill_width - COLLAPSED_W) < 1.0, "idle collapses to the lozenge",
           f"width={ov.pill_width:.1f} want={COLLAPSED_W}")
+    # Height is read off the painted pixels rather than off pill_height: a
+    # painter that ignored the attribute would still pass an attribute check.
+    idle_img = render(ov)
+    idle_rows = body_rows(idle_img)
+    check(abs(len(idle_rows) - COLLAPSED_H) <= 1,
+          "idle is painted as the thin sliver, not at full height",
+          f"measured {len(idle_rows)}px want {COLLAPSED_H}px (expanded is {HEIGHT}px)")
+
+    # -- noir: the resting pill carries no hue ------------------------------
+    mid_y = idle_rows[len(idle_rows) // 2] if idle_rows else 0
+    body_x = WIN_W // 2 + COLLAPSED_W // 4      # clear of any dot and the end caps
+    check(tint(idle_img, body_x, mid_y) <= 1, "idle body is neutral black",
+          f"channel spread {tint(idle_img, body_x, mid_y)} over neutral grey")
+    check(tint(idle_img, WIN_W // 2, mid_y) <= 1, "idle centre is neutral (dot or body)",
+          f"channel spread {tint(idle_img, WIN_W // 2, mid_y)}")
+    # The same measurement must see the pre-noir body, or it proves nothing.
+    noir = overlay_mod.BG
+    overlay_mod.BG = QtGui.QColor(20, 20, 26, 236)
+    old_spread = tint(render(ov), body_x, mid_y)
+    overlay_mod.BG = noir
+    check(old_spread >= 3, "CONTROL: the old blue-black body reads as tinted here",
+          f"channel spread {old_spread}")
+
     rec_w = ov.expanded_width_for("recording")
     ov.set_state("recording")
-    widths = []
+    widths, heights = [], []
     for _ in range(14):
         spin(0.02)
         widths.append(ov.pill_width)
+        heights.append(ov.pill_height)
     spin(0.9)
     check(abs(ov.pill_width - rec_w) < 1.0, "recording expands to its state width",
           f"width={ov.pill_width:.1f} want={rec_w:.0f}")
+    rec_rows = body_rows(render(ov))
+    check(abs(len(rec_rows) - HEIGHT) <= 1, "recording is painted at full height",
+          f"measured {len(rec_rows)}px want {HEIGHT}px")
+    check(bool(idle_rows and rec_rows) and idle_rows[-1] == rec_rows[-1],
+          "the bottom edge stays put; the pill grows upward",
+          f"bottom row idle={idle_rows[-1] if idle_rows else None} "
+          f"recording={rec_rows[-1] if rec_rows else None}")
     tweens = [w for w in widths if COLLAPSED_W + 2 < w < rec_w - 2]
     # Without this the pill could hard-cut between two widths and every other
     # width row above would still pass.
     check(len(tweens) >= 3, "expansion is animated, not a hard cut",
           f"{len(tweens)} intermediate widths sampled")
+    h_tweens = [h for h in heights if COLLAPSED_H + 1 < h < HEIGHT - 1]
+    check(len(h_tweens) >= 3, "height swells with the width rather than snapping",
+          f"{len(h_tweens)} intermediate heights sampled")
 
     # -- per-state width ----------------------------------------------------
     # Width is derived from the parts each state draws, so these assert the

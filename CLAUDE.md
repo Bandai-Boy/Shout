@@ -248,6 +248,15 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   to trace it to. The taskbar gap is height-independent for free: placement
   derives the window top from its height, so the pill shrinks upward from a
   fixed bottom edge. If you change HEIGHT, change nothing else.
+  [2026-09-10] The idle pill is now its OWN shape, `COLLAPSED_W x COLLAPSED_H`
+  (52x10, `IDLE_DOT_R = 0`, no dot), not a narrower full-height lozenge: height
+  eases from 10 to HEIGHT on the same curve as width, bottom edge fixed, and the
+  dot grows in from nothing. `probe_overlay` measures both heights and the shared
+  bottom row off the rendered pixels, and asserts the body is neutral black
+  with the old `(20,20,26)` body as its positive control (spread 5 vs 0).
+  **Check the foreground before running the gates**: under a D3D-fullscreen
+  game the two "idle/loading visible" rows fail by design (the pill hides), and
+  the focus-theft control pulls focus out of the game for half a second.
 - [2026-09-08] `probe_cues` reads the CONFIGURED voice, not the default — its
   band, note offsets and duration bounds are all derived from it. That is
   deliberate: the property it protects (the cue is inert in the transcript)
