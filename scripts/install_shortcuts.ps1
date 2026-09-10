@@ -1,9 +1,10 @@
-# Creates the Start menu entry and the autostart entry for Shout, and installs
-# the console-free interpreter they point at.
+# Installs the console-free interpreter Shout runs under and a Start menu entry
+# pointing at it. With -Autostart, Shout also starts with Windows.
+# scripts\install.ps1 runs this as its last step.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\install_shortcuts.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\install_shortcuts.ps1 [-Autostart]
 #
-# Uninstall: delete the two .lnk files this prints.
+# Uninstall: delete the .lnk files this prints.
 #
 # Why this copies an interpreter instead of just making shortcuts
 # ---------------------------------------------------------------
@@ -28,6 +29,8 @@
 # Shortcuts store ABSOLUTE paths, so re-run this after moving the project folder
 # or the shortcuts will silently point at nothing. Re-running is also the repair
 # step if a uv operation ever removes shoutw.exe.
+
+param([switch]$Autostart)
 
 $ErrorActionPreference = 'Stop'
 
@@ -85,7 +88,9 @@ if ($sub -ne 2) { throw "$target has PE subsystem $sub, expected 2 (GUI)" }
 # measuring nothing.
 $probe = Join-Path ([System.IO.Path]::GetTempPath()) 'shout_prefix_probe.txt'
 Remove-Item $probe -ErrorAction SilentlyContinue
-& $target -c "import sys, faster_whisper; open(r'$probe','w').write(sys.prefix)" | Out-Null
+# The path goes in as an argument rather than spliced into the code: a Windows
+# user name can contain an apostrophe, which would end the Python string.
+& $target -c "import sys, faster_whisper; open(sys.argv[1], 'w').write(sys.prefix)" $probe | Out-Null
 if (-not (Test-Path $probe)) { throw "$target produced no output - it failed to start or could not import faster_whisper" }
 $prefix = (Get-Content $probe -Raw).Trim()
 Remove-Item $probe -ErrorAction SilentlyContinue
@@ -97,10 +102,12 @@ Write-Output "verified  subsystem=2 (no console)  sys.prefix=$prefix"
 # --- shortcuts ---------------------------------------------------------------
 
 $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-$links = @(
-    (Join-Path $programs 'Shout.lnk'),
-    (Join-Path $programs 'Startup\Shout.lnk')
-)
+$startup = Join-Path $programs 'Startup\Shout.lnk'
+$links = @(Join-Path $programs 'Shout.lnk')
+# An existing autostart entry is an earlier choice, so it is kept AND repointed:
+# this script is also the repair after a move, and a stale link starts nothing.
+$autostartOn = $Autostart -or (Test-Path $startup)
+if ($autostartOn) { $links += $startup }
 
 $shell = New-Object -ComObject WScript.Shell
 foreach ($link in $links) {
@@ -117,6 +124,10 @@ foreach ($link in $links) {
 Write-Output ''
 Write-Output "target : $target -m shout"
 Write-Output "workdir: $root"
-Write-Output 'Shout will now start with Windows, with no console window. A second'
-Write-Output 'copy exits immediately on the single-instance mutex, so launching it'
-Write-Output 'twice is harmless.'
+if ($autostartOn) {
+    Write-Output "autostart: on. Shout starts with Windows; delete $startup to stop that."
+} else {
+    Write-Output 'autostart: off. Re-run with -Autostart to start Shout with Windows.'
+}
+Write-Output 'A second copy exits immediately on the single-instance mutex, so'
+Write-Output 'launching Shout twice is harmless.'

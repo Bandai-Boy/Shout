@@ -17,7 +17,12 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 
 ## Environment
 
-- Python 3.12 venv at `.venv/`, created with `uv`.
+- Python 3.12 venv at `.venv/`, built by `uv sync --locked` from `pyproject.toml`
+  + `uv.lock`. Every direct dependency is pinned to the version the gates ran
+  against, and `[tool.uv] constraint-dependencies` holds the transitive ones that
+  would otherwise resolve newer (onnxruntime runs the VAD). The lock reproduces
+  this venv exactly, bar the unused `pystray`. Upgrading a pin means re-locking
+  AND re-running the gates; `scripts/install.ps1` is the one-command install.
 - faster-whisper 1.2.1, CTranslate2 4.8.2, cuBLAS 12.9, cuDNN 9.25 — all pip wheels.
   No cmake, no MSVC, no CUDA Toolkit.
 - PySide6-Essentials 6.11.2 owns both UI surfaces (pill + tray). Tk and pystray
@@ -32,6 +37,9 @@ Refuted / Unverified — respect the tags; the Unverified ones are leads, not fa
 ## Commands
 
 ```bash
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # sync, model, shortcuts
+.venv/Scripts/python.exe scripts/download_model.py           # fetch + verify the model
+.venv/Scripts/python.exe scripts/make_readme_image.py        # re-render the README pill
 .venv/Scripts/python.exe scripts/bench.py                    # throughput benchmark
 .venv/Scripts/python.exe scripts/gpu_probe.py                # CUDA + compute-type smoke test
 .venv/Scripts/python.exe scripts/transcribe_meeting.py <file>  # meeting pipeline

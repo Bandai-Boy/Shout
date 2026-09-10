@@ -108,6 +108,13 @@ class Shout:
             self.ready.set()
             self._publish_state()
             log.info("READY in %.2fs from launch", time.perf_counter() - t0)
+        except FileNotFoundError:
+            # huggingface_hub's LocalEntryNotFoundError: the model was never
+            # downloaded. Shout runs offline and cannot fetch it, so say how to.
+            log.exception("speech model is not downloaded")
+            self._set_state("error")
+            self.tray.notify("Speech model not downloaded. Run scripts\\install.ps1 "
+                             "(see the README).")
         except Exception:
             log.exception("model failed to load")
             self._set_state("error")

@@ -1,0 +1,36 @@
+[project]
+name = "shout"
+version = "0.1.0"
+description = "Local, private push-to-talk dictation for Windows. Hold Ctrl+Win, speak, and the text appears at your cursor."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+# Pinned to the exact versions every gate and benchmark in this repo ran
+# against. CTranslate2 must be >= 4.7 for Blackwell (sm_120) int8, and the two
+# nvidia wheels are what let CUDA work without installing the CUDA Toolkit.
+dependencies = [
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.2",
+    "nvidia-cublas-cu12==12.9.2.10",
+    "nvidia-cudnn-cu12==9.25.1.1",
+    "numpy==2.5.3",
+    "pynput==1.8.2",
+    "pyside6-essentials==6.11.2",
+    "sounddevice==0.5.6",
+    "soxr==1.1.0",
+]
+
+[dependency-groups]
+dev = ["pillow==12.3.0"]  # scripts/make_icon.py only
+
+[tool.uv]
+package = false  # an app run as `python -m shout`, not a library to install
+environments = ["sys_platform == 'win32'"]
+# Transitive packages held at the versions the gates ran against, so uv.lock
+# reproduces the tested environment rather than whatever resolved newest.
+# onnxruntime runs the VAD. Drop these when upgrading on purpose, then re-gate.
+constraint-dependencies = [
+    "onnxruntime==1.29.0",
+    "huggingface-hub==1.30.0",
+    "filelock==3.32.5",
+]
