@@ -29,15 +29,17 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import shout.overlay as overlay_mod  # noqa: E402
 from shout.overlay import (BAR_MAX_H, COLLAPSED_H, COLLAPSED_W, DOT_INSET,  # noqa: E402
-                           GA_ROOT, GWL_EXSTYLE, HEIGHT, LABEL_GAP, MAX_PILL_W,
-                           METER_GAP, METER_W, MARGIN_Y, RIGHT_INSET, SHADOW,
-                           WANTED_EXSTYLE, WIN_H, WIN_W, WS_EX_NOACTIVATE,
-                           WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, Overlay,
-                           _get_long, expanded_width, fullscreen_app_running,
-                           user32)
+                           GA_ROOT, GW_HWNDPREV, GWL_EXSTYLE, HEIGHT, LABEL_GAP,
+                           MAX_PILL_W, METER_GAP, METER_W, MARGIN_Y, RIGHT_INSET,
+                           SHADOW, SWP_RESTACK, WANTED_EXSTYLE, WIN_H, WIN_W,
+                           WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                           WS_EX_TRANSPARENT, Overlay, _get_long, expanded_width,
+                           fullscreen_app_running, user32)
 
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
+HWND_TOP = wintypes.HWND(0)
+HWND_NOTOPMOST = wintypes.HWND(-2)
 
 
 class POINT(ctypes.Structure):
@@ -70,6 +72,16 @@ def rect(hwnd: int) -> wintypes.RECT:
 
 def visible(hwnd: int) -> bool:
     return bool(user32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def stacked_above(upper: int, lower: int) -> bool:
+    """True if `upper` is anywhere above `lower` in the z-order."""
+    h = user32.GetWindow(wintypes.HWND(lower), GW_HWNDPREV)
+    while h:
+        if int(h) == upper:
+            return True
+        h = user32.GetWindow(h, GW_HWNDPREV)
+    return False
 
 
 GREY = QtGui.QColor(128, 128, 128)
@@ -319,6 +331,45 @@ def main() -> int:
     check(max(hist) - min(hist) > 0.15,
           "history holds a varying envelope, not one repeated level",
           f"min={min(hist):.2f} max={max(hist):.2f}")
+
+    # -- stays on top when something buries it ------------------------------
+    # The 10 Sep 2026 incident, as closely as a probe can stage it: the pill is
+    # dropped into the normal band and a plain window is stacked on top of it.
+    # The live pill kept its topmost bit while buried, which no public call
+    # reproduces, so the walk row asserts the burial is found by z-order rather
+    # than by that bit.
+    ov.set_state("recording")
+    spin(0.1)
+    cover = QtWidgets.QWidget()
+    cover.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
+    cover.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+    r = rect(hwnd)
+    cover.setGeometry(r.left, r.top, r.right - r.left, r.bottom - r.top)
+    cover.show()
+    spin(0.2)
+    cover_h = int(cover.winId())
+    ov._keep_on_top = lambda: None          # CONTROL: recovery switched off
+    user32.SetWindowPos(wintypes.HWND(hwnd), HWND_NOTOPMOST, 0, 0, 0, 0, SWP_RESTACK)
+    user32.SetWindowPos(wintypes.HWND(cover_h), HWND_TOP, 0, 0, 0, 0, SWP_RESTACK)
+    spin(1.2)
+    check(stacked_above(cover_h, hwnd),
+          "CONTROL: with recovery off, a buried pill stays buried",
+          "proves the recovery rows below measure something")
+    found = ov.buried_under()
+    check(found == cover_h, "the z-order walk names the window on top of the pill",
+          f"found {found} want {cover_h}")
+    fg = int(user32.GetForegroundWindow())
+    del ov._keep_on_top
+    spin(1.2)
+    check(stacked_above(hwnd, cover_h), "a buried pill restacks itself on top",
+          "within two half-second checks")
+    check(_get_long(wintypes.HWND(hwnd), GWL_EXSTYLE) & WS_EX_TOPMOST,
+          "and is topmost again")
+    check(ov.buried_under() == 0, "nothing normal is left above it")
+    check(int(user32.GetForegroundWindow()) == fg, "restacking did not move focus")
+    cover.hide()
+    cover.deleteLater()
+    spin(0.1)
 
     ov.stop()
     spin(0.1)

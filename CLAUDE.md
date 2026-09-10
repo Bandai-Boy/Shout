@@ -385,3 +385,23 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   survives; swapping in the pre-fix `inject.py` fails exactly that row, 10/11.
   -> Anything that borrows the clipboard must hand it back with the privacy it
   arrived with. Audit the restore path, not just the write.
+
+- [2026-09-10] **The pill "hid behind windows"** an hour after launch, and
+  Shout was not the cause. A z-order walk (`GetTopWindow` + `GW_HWNDNEXT`,
+  reading `WS_EX_TOPMOST` off each window) put it at z=35 under two VS Code
+  windows **with its topmost bit still set**. It was not alone: 22 topmost
+  windows from four processes, explorer's own `Shell_SecondaryTrayWnd` among
+  them, had been demoted below normal windows as one block. All were in band 1
+  (`GetWindowBand`), so nothing structural blocks recovery, and
+  `SetWindowPos(HWND_TOPMOST)` on the live pill moved it from z=35 to z=6
+  without touching the foreground. `_keep_on_top()` now does that on the 0.5s
+  fullscreen poll, but only when a visible, uncloaked, same-band, non-topmost
+  window is above the pill, so it never fights other topmost windows for the
+  top slot. It logs once per burial with the class and pid, never the title.
+  Two traps: the bit cannot detect this (it stayed set the whole time), only
+  the walk can; and `SetWindowLong` cannot set `WS_EX_TOPMOST` at all. The probe
+  stages the burial with `HWND_NOTOPMOST` plus a plain window on top, because
+  no public call reproduces bit-set-but-buried; its control switches recovery
+  off and requires the pill to stay buried. **The cause is still unknown**, and
+  `shout.log` now names the window on top each time it happens, so read that
+  before theorising.

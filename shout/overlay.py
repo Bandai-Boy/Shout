@@ -56,6 +56,11 @@ WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TRANSPARENT = 0x00000020
 WANTED_EXSTYLE = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT
+WS_EX_TOPMOST = 0x00000008
+GW_HWNDPREV = 3
+HWND_TOPMOST = wintypes.HWND(-1)
+SWP_RESTACK = 0x0001 | 0x0002 | 0x0010 | 0x0200  # NOSIZE|NOMOVE|NOACTIVATE|NOOWNERZORDER
+DWMWA_CLOAKED = 14
 
 # SHQueryUserNotificationState — the documented "should I put something on
 # screen right now" query. It covers exclusive-fullscreen D3D, which comparing
@@ -77,6 +82,48 @@ _get_long.argtypes = [wintypes.HWND, ctypes.c_int]
 _get_long.restype = ctypes.c_ssize_t
 _set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
 _set_long.restype = ctypes.c_ssize_t
+
+dwmapi = ctypes.WinDLL("dwmapi")
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.SetWindowPos.restype = wintypes.BOOL
+dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p,
+                                         wintypes.DWORD]
+# Undocumented, but exported by user32 since Windows 8 and stable since. Without
+# it every window counts as the pill's band, which only costs the band filter.
+_GetWindowBand = getattr(user32, "GetWindowBand", None)
+if _GetWindowBand is not None:
+    _GetWindowBand.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _GetWindowBand.restype = wintypes.BOOL
+
+
+def _band(h) -> int:
+    b = wintypes.DWORD(0)
+    if _GetWindowBand is None or not _GetWindowBand(h, ctypes.byref(b)):
+        return 0
+    return b.value
+
+
+def _cloaked(h) -> bool:
+    """True for a window on another virtual desktop: 'visible', but not here."""
+    c = ctypes.c_int(0)
+    dwmapi.DwmGetWindowAttribute(h, DWMWA_CLOAKED, ctypes.byref(c), ctypes.sizeof(c))
+    return bool(c.value)
+
+
+def _describe(h: int) -> str:
+    """Class and pid, deliberately not the title: titles carry document names,
+    and shout.log is the file people paste into bug reports."""
+    cls = ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(wintypes.HWND(h), cls, 128)
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(wintypes.HWND(h), ctypes.byref(pid))
+    return f"{cls.value!r} (pid {pid.value})"
 
 # -- geometry ----------------------------------------------------------------
 
@@ -387,6 +434,7 @@ class Overlay:
         self._dirty = True
         self._last_fullscreen_check = 0.0
         self._fullscreen = False
+        self._buried = False
         self._stopped = False
 
     # -- called from other threads (attribute rebinds only) -----------------
@@ -430,6 +478,57 @@ class Overlay:
             return False
         got = _get_long(wintypes.HWND(self._hwnd), GWL_EXSTYLE)
         return (got & WANTED_EXSTYLE) == WANTED_EXSTYLE
+
+    # -- z-order ------------------------------------------------------------
+
+    def buried_under(self) -> int:
+        """The first window stacked above the pill that has no business being
+        there, or 0: visible, on this virtual desktop, in the pill's own z-band,
+        and NOT topmost. Windows keeps every topmost window above every normal
+        one, so on a healthy stack this finds nothing.
+
+        The band test is there because the Start menu and the other shell
+        surfaces live in higher bands, where they are legitimately above the
+        pill, and SetWindowPos cannot move a window across bands: counting them
+        would restack every half second for as long as Start stayed open."""
+        me = wintypes.HWND(self._hwnd)
+        band = _band(me)
+        h = user32.GetWindow(me, GW_HWNDPREV)
+        while h:
+            if (user32.IsWindowVisible(h)
+                    and not (_get_long(h, GWL_EXSTYLE) & WS_EX_TOPMOST)
+                    and not _cloaked(h) and _band(h) == band):
+                return int(h)
+            h = user32.GetWindow(h, GW_HWNDPREV)
+        return 0
+
+    def _keep_on_top(self) -> None:
+        """Put the pill back on top if something has stacked it under a normal
+        window. Measured 10 Sep 2026, an hour after launch: the pill sat at z=35
+        below two VS Code windows with WS_EX_TOPMOST still set, and it was not
+        alone. 22 topmost windows from four processes, the second monitor's own
+        taskbar among them, had been pushed below normal windows as one block.
+        Another process reordered the stack, and Shout cannot stop that. It can
+        notice and recover: SetWindowPos(HWND_TOPMOST) on that live window moved
+        it from z=35 to z=6 without touching the foreground.
+
+        Acts only when something is actually wrong, so the pill never fights
+        other topmost windows (taskbar thumbnails, tooltips) for the top slot.
+        The bit is not enough to restore on its own: WS_EX_TOPMOST set through
+        SetWindowLong changes nothing, which is why _enforce_exstyle skips it."""
+        if not self._hwnd:
+            return
+        me = wintypes.HWND(self._hwnd)
+        above = self.buried_under()
+        lost = not (_get_long(me, GWL_EXSTYLE) & WS_EX_TOPMOST)
+        if not (above or lost):
+            self._buried = False
+            return
+        if not self._buried:            # once per burial, not every half second
+            log.warning("pill was stacked below %s; restacking it on top",
+                        _describe(above) if above else "normal windows (topmost lost)")
+        self._buried = True
+        user32.SetWindowPos(me, HWND_TOPMOST, 0, 0, 0, 0, SWP_RESTACK)
 
     # -- placement ----------------------------------------------------------
 
@@ -487,6 +586,8 @@ class Overlay:
             self._fullscreen = fullscreen_app_running()
             if was != self._fullscreen:
                 self._dirty = True
+            if self._shown:
+                self._keep_on_top()
 
         state = self._state
         if state != self.state:
@@ -497,6 +598,7 @@ class Overlay:
         if want_visible and not self._shown:
             self.widget.show()
             self._enforce_exstyle()
+            self._keep_on_top()
             self._shown = True
             self._dirty = True
         elif not want_visible and self._shown:
