@@ -28,6 +28,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 # offline flag, so this wins. Importing shout.transcribe before faster_whisper
 # also runs cuda_dlls.enable() first, which the CUDA DLL search depends on.
 os.environ["HF_HUB_OFFLINE"] = "0"
+# Without Developer Mode, Windows will not let huggingface_hub symlink its cache,
+# and it says so in a long warning mid-install. It stores plain files instead,
+# which for one download takes no extra space, so the warning only alarms.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from shout.config import Config  # noqa: E402
 from shout.transcribe import Transcriber, load_wav  # noqa: E402
