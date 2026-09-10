@@ -12,6 +12,11 @@ Two capture modes, selected by cfg.preroll_ms:
 
 The mode is a config flag rather than an architectural assumption on purpose:
 switching should be a setting, not a rewrite.
+
+Either way, unless cfg.input_device names one, the device is the MME Sound
+Mapper, so both modes follow the Windows default mic as it changes. On
+PortAudio's None the per-chord mode followed only by an accident of Windows
+device numbering, and the held stream did not follow at all; see shout.devices.
 """
 from __future__ import annotations
 
@@ -22,6 +27,8 @@ import threading
 import numpy as np
 import sounddevice as sd
 import soxr
+
+from .devices import follow_default
 
 log = logging.getLogger(__name__)
 TARGET_RATE = 16000
@@ -34,6 +41,9 @@ class AudioError(RuntimeError):
 class Recorder:
     def __init__(self, device=None, preroll_ms: int = 0) -> None:
         self.device = device
+        # Resolved once: PortAudio's device list is fixed for the life of the
+        # process, and the Mapper's index with it.
+        self._device = device if device is not None else follow_default("input")
         self.preroll_ms = preroll_ms
         self._lock = threading.Lock()
         self._stream: sd.InputStream | None = None
@@ -52,11 +62,11 @@ class Recorder:
         rather than the 16k we want. Try 16k, fall back to the device default and
         resample ourselves rather than letting an unknown driver path do it."""
         try:
-            sd.check_input_settings(device=self.device, samplerate=TARGET_RATE,
+            sd.check_input_settings(device=self._device, samplerate=TARGET_RATE,
                                     channels=1, dtype="float32")
             return TARGET_RATE
         except Exception:
-            info = sd.query_devices(self.device, "input")
+            info = sd.query_devices(self._device, "input")
             rate = int(info["default_samplerate"])
             log.info("device rejects 16kHz; capturing at %dHz and resampling", rate)
             return rate
@@ -90,10 +100,11 @@ class Recorder:
         self._rate = self._pick_rate()
         self._stream = sd.InputStream(
             samplerate=self._rate, channels=1, dtype="float32",
-            device=self.device, callback=self._callback,
+            device=self._device, callback=self._callback,
         )
         self._stream.start()
-        log.info("mic open at %dHz (device=%s)", self._rate, self.device or "default")
+        log.info("mic open at %dHz on %r", self._rate,
+                 sd.query_devices(self._device, "input")["name"])
 
     def _close(self) -> None:
         if self._stream is None:

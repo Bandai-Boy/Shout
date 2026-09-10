@@ -19,13 +19,19 @@ The six presets here are read-only materials. A voice tuned in the lab is saved
 under a name of its own into `cue_presets`, so the material it started from stays
 exactly as shipped and stays selectable — see `Voice.resolve`.
 
-Three decisions worth keeping:
+Four decisions worth keeping:
 
 *Persistent output stream.* The cue IS the feedback, so it has to fire on
 chord-down with no perceptible delay. `sd.play()` opens a device per call, which
 costs tens of milliseconds and is audible as a lag. A stream held open with a
 callback that mixes in whichever cue is pending costs one idle callback per block
 and fires immediately.
+
+*That stream is opened on the MME Sound Mapper, not on `device=None`.* A stream
+held open for the life of the process has to follow the Windows default output
+when it changes, and a stream already open on PortAudio's None never moves.
+Windows re-routes a stream on the Mapper live, with nothing to poll — see
+`shout.devices`.
 
 *Played before the microphone opens — which is not the real defence.* With
 `preroll_ms = 0` the mic opens on chord-down, so a cue played at the same instant
@@ -54,6 +60,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 import sounddevice as sd
+
+from .devices import follow_default
 
 log = logging.getLogger(__name__)
 
@@ -213,9 +221,12 @@ class Cues:
     # -- device ------------------------------------------------------------
 
     def _open(self) -> None:
+        device = self.device if self.device is not None else follow_default("output")
+        where = "PortAudio's default"
         try:
-            info = sd.query_devices(self.device, "output")
+            info = sd.query_devices(device, "output")
             self.rate = int(info["default_samplerate"]) or FALLBACK_RATE
+            where = info["name"]
         except Exception:
             log.debug("no output device info; assuming %dHz", FALLBACK_RATE,
                       exc_info=True)
@@ -224,14 +235,15 @@ class Cues:
             try:
                 self._stream = sd.OutputStream(
                     samplerate=self.rate, channels=channels, dtype="float32",
-                    device=self.device, callback=self._callback, latency="low",
+                    device=device, callback=self._callback, latency="low",
                 )
                 self._stream.start()
                 self._channels = channels
-                log.info("cues ready at %dHz, %d channel(s), voice %r "
+                log.info("cues ready on %r at %dHz, %d channel(s), voice %r "
                          "(root=%.0fHz decay=%.2f bright=%.2f length=%.2f)",
-                         self.rate, channels, self.voice.name, self.voice.root_hz,
-                         self.voice.decay, self.voice.bright, self.voice.length)
+                         where, self.rate, channels, self.voice.name,
+                         self.voice.root_hz, self.voice.decay, self.voice.bright,
+                         self.voice.length)
                 return
             except Exception:
                 self._stream = None

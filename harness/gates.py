@@ -30,6 +30,7 @@ GATES = [
     ("inject", ROOT / "harness" / "probe_inject.py"),
     ("stuck", ROOT / "harness" / "probe_stuck.py"),
     ("cues", ROOT / "harness" / "probe_cues.py"),
+    ("route", ROOT / "harness" / "probe_route.py"),
     ("lab", ROOT / "harness" / "probe_lab.py"),
     ("overlay", ROOT / "harness" / "probe_overlay.py"),
     ("app", ROOT / "harness" / "probe_app.py"),

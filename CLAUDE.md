@@ -300,3 +300,35 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   Not verified: the combo popup's styling — `view().grab()` returns blank
   because the view only renders as a real popup, and showing one would put it on
   the user's desktop.
+
+- [2026-09-09] Cues stayed on the speakers after a Windows switch to headphones,
+  while the lab stayed on the headphones after a switch back. Cause:
+  **PortAudio's `device=None` is an MME device NUMBER, and Windows renumbers
+  MME devices so that 0 is always the current default** (`waveOutGetDevCapsW`
+  before and after a switch), while PortAudio keeps the name it cached at init.
+  So a stream OPENED after a switch lands on the new default under a stale name,
+  and a stream already OPEN never moves. Cues and the lab each hold one output
+  stream for their lifetime, so each stayed wherever the default was at launch.
+  Fix: `shout.devices.follow_default()` opens the **MME Sound Mapper** (first
+  MME device of each direction, found by position because the name is
+  localized), which Windows re-routes live, both ways. `Cues` and `Recorder`
+  both use it. Corollary: an explicit MME index in config is no pin either;
+  after a switch, the index labelled "headphones" can open the speakers.
+  `harness/probe_route.py` asserts it with a REAL switch of the default output
+  AND input, restored in a `finally`, so **running the gates moves your audio
+  and mic for ~3s**. Instruments: the output session peak meter per endpoint (a
+  session lingers on every endpoint ever used, so only a non-zero peak counts),
+  and for input the session STATE (a quiet room reads peak 0 either way).
+  Positive control: a concurrent child holding the pinned pre-fix streams,
+  which must stay behind. **The correction that matters:** I told Gabe the
+  per-chord mic "won't follow a mic switch until restart". I had inferred that
+  from PortAudio's source, which caches the default at init, and never tested a
+  stream opened after a switch. The subject-side control gave FAIL 14/18, and
+  the per-chord mic row was one of the rows that did NOT flip: the old code
+  already followed there, via the renumbering. -> **When running a positive
+  control, read WHICH rows flip, not just the verdict**; a row that passes on
+  the pre-fix code falsifies your model of the bug on that path. Smaller traps:
+  `Popen.pid` of the venv `python.exe` is uv's trampoline, so a child measured
+  by PID must report `os.getpid()` itself (empty BASELINE rows were the tell);
+  and the per-app audio PropertyStore in the registry holds an entry for every
+  exe that ever played anywhere (375 here), so its entries are not overrides.

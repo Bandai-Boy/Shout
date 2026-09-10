@@ -38,10 +38,10 @@ def main() -> int:
     cfg = Config()
 
     # --- capture path -------------------------------------------------
-    info = sd.query_devices(cfg.input_device, "input")
-    native = int(info["default_samplerate"])
-
     rec = Recorder(device=cfg.input_device, preroll_ms=cfg.preroll_ms)
+    # The device the Recorder actually opens, not PortAudio's resolution of None.
+    info = sd.query_devices(rec._device, "input")
+    native = int(info["default_samplerate"])
     t0 = time.perf_counter()
     rec.start()
     open_ms = (time.perf_counter() - t0) * 1000

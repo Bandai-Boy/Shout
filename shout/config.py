@@ -22,7 +22,10 @@ class Config:
     language: str = "en"
 
     # --- audio ---
-    input_device: int | None = None      # None = system default
+    # None = follow the Windows default mic, live. Read shout.devices before
+    # setting an index: an MME index is a Windows device NUMBER, and Windows
+    # renumbers them whenever the default changes.
+    input_device: int | None = None
     # 0 = open the mic on chord-down and close on release (chosen: session 1).
     # >0 keeps the stream open with a rolling buffer of this length, which removes
     # first-syllable clipping at the cost of a permanent mic-in-use indicator.
@@ -51,7 +54,9 @@ class Config:
     # dict. `cue_preset` may name one of these instead of a built-in, which is
     # how a tuned material survives without shadowing the material it came from.
     cue_presets: dict = field(default_factory=dict)
-    output_device: int | None = None  # None = system default
+    # None = follow the Windows default output, live. Same caveat on indexes as
+    # input_device; see shout.devices.
+    output_device: int | None = None
     overlay: bool = True             # the state pill above the taskbar
 
     # --- diagnostics ---
