@@ -10,6 +10,13 @@ Local-only voice stack on this machine. Two tracks that share an inference envir
 Nothing leaves this machine. No API, no cloud, no BAA required. That constraint drove
 every architectural decision and is not negotiable.
 
+**This repo is PUBLIC** at github.com/Bandai-Boy/Shout (since 10 Sep 2026), so
+everything committed is published. Commits go out under the GitHub noreply
+address, set in this repo's local git config. `Bandai-Boy/Shout-archive` is the
+private, archived pre-publication history, and its commits carry the personal
+email: never unarchive it or make it public. `HANDOFF*.md` is gitignored on
+purpose.
+
 **Read [RESEARCH.html](RESEARCH.html) before changing any inference, hotkey, or model
 decision.** It carries the measured benchmarks, the claims audit, the ruled-out options
 with reasons, and the four hotkey traps. Claims in it are tagged Measured / Verified /

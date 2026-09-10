@@ -38,7 +38,7 @@ To have Shout start with Windows, add `-Autostart` to the last line. Re-running 
 
 ## Use
 
-Start **Shout** from the Start menu. A tray icon appears, and a pill sits above the taskbar. The pill shows *Starting* until the model is loaded, which usually takes a couple of seconds.
+Start **Shout** from the Start menu. A tray icon appears, and a pill sits above the taskbar. The pill shows *Starting* until the model is loaded, which takes a few seconds.
 
 | To | Do this |
 |---|---|
