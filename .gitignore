@@ -20,3 +20,8 @@ __pycache__/
 # --- scratch --------------------------------------------------------------
 scratch_*.log
 *.log
+
+# --- session state --------------------------------------------------------
+# HANDOFF.md bridges one Claude Code session to the next and is rewritten
+# every session. It is not documentation, so it does not belong in history.
+HANDOFF*.md
