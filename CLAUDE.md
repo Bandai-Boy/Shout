@@ -50,12 +50,29 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # sync, model, sho
 .venv/Scripts/python.exe scripts/bench.py                    # throughput benchmark
 .venv/Scripts/python.exe scripts/gpu_probe.py                # CUDA + compute-type smoke test
 .venv/Scripts/python.exe scripts/transcribe_meeting.py <file>  # meeting pipeline
-.venv/Scripts/shoutw.exe  scripts/cue_lab.py                 # audition the cue sounds
 ```
 
-Normally you never type that: **right-click the tray icon -> Cue sounds...**
-`shoutw.exe` for the lab, not `pythonw.exe` — see the 8 Sep lab note on uv's
-console trampoline. The lab drives `shout.cues.build()` directly and merges the
+## The Shout window
+
+`shout/window.py` is one window with two pages, **Recent dictations** and **Cue
+sounds**, opened from the tray menu (an entry per page). It runs INSIDE Shout's
+process, on the GUI thread; the cue lab used to be a separate `scripts/cue_lab.py`
+process and moved in on 10 Sep, because the recent dictations live only in
+Shout's memory (`shout/recent.py`, the last 10) and a second process could only
+see them if they were written to disk, which the README promises never happens.
+Consequences: `window.application()` builds the QApplication for Shout AND the
+gates, and sets Fusion app-wide (the tray menu renders the same under it); the
+window is rebuilt on each open after a close, so the sounds page re-reads
+config.json; and `Window.closeEvent` must close the lab's output stream, since
+no process exit does it any more.
+
+A left click on the tray icon copies the last dictation (private). Its notice
+says a word count and never the words: Windows keeps past notifications in the
+notification center. `_finish` adds to the list BEFORE `inject()`, so a paste
+that raises or lands nowhere still leaves the words; `probe_app` asserts that
+order, and moving the add after `inject()` fails exactly three of its rows.
+
+The lab drives `shout.cues.build()` directly and merges the
 cue keys into config.json rather than rewriting it. A running Shout polls that
 file every 500ms and follows the **cue keys only**, so a Save plays from the
 next chord with no restart; every other key still needs a relaunch.
@@ -65,9 +82,12 @@ under a name of its own into `cue_presets`, so the material stays as shipped and
 stays selectable; editing a material renames what you are editing, and saving
 under a material's name is refused. `Voice.resolve()` is the single place that
 turns config into a voice and the only thing both readers use — `__main__.py`
-and `probe_cues.py`. `harness/probe_lab.py` drives the real `Lab` against a
+and `probe_cues.py`. `harness/probe_lab.py` drives the real `Window` against a
 throwaway `APPDATA` and asserts the round trip: what the lab played is what the
-app resolves.
+app resolves. It also covers the recent page, and its layout sweep checks
+wrapped text against `heightForWidth` at the current width, because a wrapped
+label's `minimumSizeHint` is taken at some other width (17px for a label
+needing 85).
 
 **Re-run `harness/probe_cues.py` after saving a new voice:** that gate reads the
 configured voice and asserts the cue stays inert in the transcript, which is a
@@ -373,7 +393,7 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   been building its own bare QApplication, so it ran on windows11 and would
   have passed a jump the real lab never made. Caught by an in-probe control, a
   stock QSlider under the same sheet, which jumped too. Now
-  `cue_lab.application()` builds the app for both. The same mismatch means the
+  `cue_lab.application()` (now `window.application()`) builds the app for both. The same mismatch means the
   layout sweep had been measuring windows11 geometry, not the lab's.
   (3) **The drag screech**: valueChanged per pixel, and `Cues.play()` restarts
   by design. `Slider.held` gates the audition to one play on release. It has to

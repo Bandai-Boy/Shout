@@ -3,9 +3,9 @@
     python -m shout
 
 Threading model:
-    main        Qt event loop. The overlay, the tray and the config.json watch
-                all live here — Qt objects may only be touched from the thread
-                that created them
+    main        Qt event loop. The overlay, the tray, the Shout window and the
+                config.json watch all live here — Qt objects may only be
+                touched from the thread that created them
     hook        pynput WH_KEYBOARD_LL callback — enqueue and return, nothing else
     worker      drains the queue, runs the gesture machine, starts/stops capture
     watchdog    20ms poll: ticks, missed key-ups, dead-hook detection
@@ -35,9 +35,12 @@ from .config import Config, config_dir
 from .cues import Cues, Voice
 from .gestures import Command, Gestures, State
 from .hotkey import HotkeyListener
+from .inject import set_clipboard_text
 from .overlay import Overlay
+from .recent import Recent
 from .tray import Tray
 from .watchdog import Watchdog
+from .window import Window, application
 
 log = logging.getLogger("shout")
 
@@ -82,7 +85,9 @@ class Shout:
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)
         self.watchdog = Watchdog(self.gestures, self.hotkey, self._dispatch)
-        self.tray = Tray(self._quit)
+        self.recent = Recent()
+        self.window: Window | None = None
+        self.tray = Tray(self._quit, self.open_window, self.copy_last)
         self.overlay = Overlay(enabled=cfg.overlay,
                                level_source=lambda: self.recorder.level)
         self.commits = ThreadPoolExecutor(max_workers=1, thread_name_prefix="commit")
@@ -242,6 +247,9 @@ class Shout:
             if not text:
                 log.info("empty transcript, nothing to inject")
                 return
+            # Before the paste, so a paste that fails or lands nowhere still
+            # leaves the words somewhere to get them back from.
+            self.recent.add(text)
             outcome = inject(text, self.cfg)
             latency = time.perf_counter() - t_commit
             log.info("END-TO-END %.0fms for %.1fs of audio -> %s",
@@ -256,6 +264,40 @@ class Shout:
         finally:
             self._publish_state()
 
+    # -- the window and the recent list --------------------------------------
+
+    def open_window(self, page: str) -> None:
+        """GUI thread, from the tray menu. One window: opening it again raises
+        it and switches the page rather than stacking a second copy."""
+        if self.window is None or not self.window.isVisible():
+            if self.window is not None:
+                self.window.deleteLater()
+            self.window = Window(self.recent, page)
+        else:
+            self.window.show_page(page)
+        if self.window.isMinimized():
+            self.window.showNormal()
+        else:
+            self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+
+    def copy_last(self) -> None:
+        """GUI thread, from a left click on the tray icon: the way back to a
+        paste that landed nowhere."""
+        entry = self.recent.last()
+        if entry is None:
+            self.tray.notify("Nothing dictated yet")
+            return
+        if not set_clipboard_text(entry.text):
+            self.tray.notify("Another app is holding the clipboard. Try again.")
+            return
+        # A count, never the words: Windows keeps past notifications in the
+        # notification center, and this one would leave your words there.
+        words = len(entry.text.split())
+        self.tray.notify(f"Copied your last dictation ({words} word"
+                         f"{'' if words == 1 else 's'}). Press Ctrl+V to paste it.")
+
     # -- lifecycle ----------------------------------------------------------
 
     def run(self, app: QtWidgets.QApplication) -> None:
@@ -269,6 +311,8 @@ class Shout:
         log.info("hold Ctrl+Win to dictate; double-tap to latch hands-free")
         app.exec()           # blocks: Qt owns the main thread until quit
         # Only now is it safe to touch the widgets, whichever thread asked to quit.
+        if self.window is not None:
+            self.window.close()
         self.overlay.teardown()
         self.tray.teardown()
 
@@ -298,11 +342,10 @@ def main() -> int:
     if not _claim_single_instance():
         log.error("Shout is already running")
         return 1
-    app = QtWidgets.QApplication(sys.argv)
-    # Shout has no ordinary window, and the pill hides itself whenever a game is
-    # fullscreen. Without this, that hide is the last window closing and Qt
-    # exits the app — the dictation hotkey would die the first time you played
-    # something.
+    app = application(sys.argv)
+    # The pill hides itself whenever a game is fullscreen, and the Shout window
+    # comes and goes. Without this, either one closing as the last window exits
+    # the app, and the dictation hotkey dies with it.
     app.setQuitOnLastWindowClosed(False)
     Shout(cfg).run(app)
     return 0

@@ -12,8 +12,9 @@ changes the whole set consistently rather than one tone at a time.
 
 The default voice reproduces the original tones exactly — 660/990Hz, flat
 sustain, pure sine — so nothing changes until a voice is chosen. Audition them
-with `scripts/cue_lab.py`, which drives THIS module rather than its own copy of
-the synth, and writes the result to config.json.
+on the cue sounds page of the Shout window (`shout/window.py`), which drives THIS
+module rather than its own copy of the synth, and writes the result to
+config.json.
 
 The six presets here are read-only materials. A voice tuned in the lab is saved
 under a name of its own into `cue_presets`, so the material it started from stays

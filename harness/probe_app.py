@@ -18,11 +18,20 @@ pasted, and the recorded audio is discarded rather than committed.
 
 The model is deliberately not loaded — smoke.py owns that — which also covers the
 case where a chord arrives before the model is ready.
+
+It also owns the way back to a paste that landed nowhere, because that is
+composition too: the transcript has to reach the recent list BEFORE inject()
+runs, and a left click on the tray icon has to put it back on the clipboard.
+inject() is replaced for the whole run, since the real one would paste into
+whatever window has focus. The Shout window is opened through the real tray
+menu but never shown on screen, and the clipboard the gate borrows is put back,
+marked private.
 """
 from __future__ import annotations
 
+import ctypes
+import logging
 import os
-import struct
 import sys
 import threading
 import time
@@ -32,15 +41,51 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6 import QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtWidgets  # noqa: E402
 
+import shout.__main__ as shout_main  # noqa: E402
+from shout import inject as inj  # noqa: E402
 from shout.__main__ import Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
 from shout.gestures import Event  # noqa: E402
 from shout.overlay import COLLAPSED_W, fullscreen_app_running, user32  # noqa: E402
-from shout.tray import CUE_LAB, cue_lab_exe  # noqa: E402
+from shout.window import application  # noqa: E402
+
+inj.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+
+TRIGGER = QtWidgets.QSystemTrayIcon.ActivationReason.Trigger    # left click
+CONTEXT = QtWidgets.QSystemTrayIcon.ActivationReason.Context    # right click
+SENTINEL = "probe_app clipboard sentinel"
 
 rows: list[tuple[bool, str, str]] = []
+
+
+class OffscreenWindow(shout_main.Window):
+    """The real window, off the screen: it is an ordinary activating window,
+    and showing it would take focus from whatever the user is doing."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+
+
+shout_main.Window = OffscreenWindow
+
+
+def clipboard_is_private() -> bool:
+    fmt = inj.user32.RegisterClipboardFormatW(inj._EXCLUDE)
+    return bool(fmt) and bool(inj.user32.IsClipboardFormatAvailable(fmt))
+
+
+def clipboard_becomes(text: str, seconds: float = 2.0) -> str | None:
+    """Polled, because a click emitted from the driver thread is delivered on
+    the GUI thread."""
+    deadline = time.monotonic() + seconds
+    got = inj.get_clipboard_text()
+    while got != text and time.monotonic() < deadline:
+        time.sleep(0.02)
+        got = inj.get_clipboard_text()
+    return got
 
 # A hang here is byte-identical to a hang anywhere else: no output, no error,
 # and on Windows a killed child's buffered stdout is usually lost, so the run
@@ -73,7 +118,7 @@ def visible(hwnd: int) -> bool:
 
 
 def main() -> int:
-    qapp = QtWidgets.QApplication(sys.argv[:1])
+    qapp = application(sys.argv[:1])
     qapp.setQuitOnLastWindowClosed(False)
 
     cfg = Config()
@@ -82,6 +127,21 @@ def main() -> int:
     played: list[str] = []
     real_play = app.cues.play
     app.cues.play = lambda name: (played.append(name), real_play(name))[0]
+
+    # What each paste was handed, beside what the recent list's newest entry
+    # held at that instant. Never the real inject(): see the docstring.
+    pasted: list[tuple[str, str | None]] = []
+
+    def fake_inject(text: str, _cfg) -> str:
+        last = app.recent.last()
+        pasted.append((text, last.text if last else None))
+        return "pasted"
+
+    inj.inject = fake_inject
+    notices: list[str] = []
+    app.tray.notify = lambda message, title="Shout": notices.append(message)
+    borrowed = inj.get_clipboard_text()
+    inj.set_clipboard_text(SENTINEL, private=False)
 
     returned = threading.Event()
 
@@ -168,7 +228,7 @@ def main() -> int:
             # exactly what a gate must never do.
             stage("driver: end latch and commit")
             app.ready.set()
-            app.transcriber = SimpleNamespace(transcribe=lambda audio: "")
+            app.transcriber = SimpleNamespace(transcribe=lambda audio: "first probe words")
             app._dispatch(app.gestures.handle(Event.CHORD_DOWN, t + 0.40))
             app._dispatch(app.gestures.handle(Event.CHORD_UP, t + 0.45))
             check(played[-1] == "stop", "stop cue fired when the latch ended",
@@ -189,6 +249,52 @@ def main() -> int:
                   "collapsed again once the commit settles",
                   f"width={app.overlay.pill_width:.0f}")
 
+            # --- the way back to a paste that landed nowhere ----------------
+            stage("driver: recent list")
+            last = app.recent.last()
+            check(pasted[:1] == [("first probe words", "first probe words")],
+                  "a dictation is in the recent list BEFORE its paste runs",
+                  f"paste got {pasted[0][0]!r} with {pasted[0][1]!r} already listed"
+                  if pasted else "inject was never reached")
+            check(last is not None and last.text == "first probe words",
+                  "and stays there after it", f"newest: {last.text if last else None!r}")
+
+            def broken(text: str, _cfg) -> str:
+                raise OSError("simulated paste failure")
+
+            inj.inject = broken
+            app.transcriber = SimpleNamespace(transcribe=lambda audio: "zebra quartz umbrella")
+            logging.disable(logging.CRITICAL)       # the traceback is expected
+            try:
+                app._finish([0.0] * 16000, time.perf_counter())
+            finally:
+                logging.disable(logging.NOTSET)
+                inj.inject = fake_inject
+            texts = [e.text for e in app.recent.newest_first()]
+            check(texts == ["zebra quartz umbrella", "first probe words"],
+                  "a paste that raises still leaves its words in the list",
+                  f"{texts}")
+
+            stage("driver: tray clicks")
+            inj.set_clipboard_text(SENTINEL, private=False)
+            before = len(notices)
+            app.tray.icon.activated.emit(CONTEXT)
+            time.sleep(0.3)
+            check(inj.get_clipboard_text() == SENTINEL and len(notices) == before,
+                  "a right click copies nothing (control: it only opens the menu)",
+                  f"clipboard {inj.get_clipboard_text()!r}")
+            app.tray.icon.activated.emit(TRIGGER)
+            got = clipboard_becomes("zebra quartz umbrella")
+            check(got == "zebra quartz umbrella",
+                  "a left click on the tray icon copies the last dictation",
+                  f"clipboard {got!r}")
+            check(clipboard_is_private(), "marked private, like the dictation was")
+            said = notices[-1] if len(notices) > before else ""
+            check("3 words" in said and not any(
+                w in said for w in ("zebra", "quartz", "umbrella")),
+                  "and the notice gives a count, never the words",
+                  f"{said!r}")
+
             # --- shutdown ----------------------------------------------------
             # Deliberately from a worker thread, not the GUI thread: stop() must
             # be safe to call from anywhere, and the teardown that touches Qt
@@ -208,22 +314,36 @@ def main() -> int:
     stage("main: building tray + overlay")
     app.tray.build()
 
-    # The tray is the only surface Shout has, so "can you reach the cue lab"
-    # is a real question about the app, not about a script. All three of these
-    # fail independently: a renamed menu entry, a moved script, and a launcher
-    # that would pop a console window (which is exactly how the app shipped
-    # before the 8 Sep trampoline fix).
+    # The tray is the only way into Shout, so "can you reach the window" is a
+    # real question about the app. Through the real menu actions, on the GUI
+    # thread, the way a click delivers them.
     labels = [a.text() for a in app.tray._menu.actions() if not a.isSeparator()]
-    check("Cue sounds..." in labels, "the tray menu can open the cue lab",
+    check(labels == ["Recent dictations...", "Cue sounds...", "Quit Shout"],
+          "the tray menu opens either page of the window, and quits",
           f"menu={labels}")
-    check(CUE_LAB.exists(), "the script that menu entry points at is really there",
-          str(CUE_LAB))
-    exe = Path(cue_lab_exe())
-    raw = exe.read_bytes()
-    subsystem = struct.unpack_from("<H", raw,
-                                   struct.unpack_from("<I", raw, 0x3c)[0] + 0x5c)[0]
-    check(subsystem == 2, "the lab opens windowed, with no console",
-          f"{exe.name} PE subsystem={subsystem} (2=GUI, 3=console)")
+    actions = {a.text(): a for a in app.tray._menu.actions()}
+    actions["Cue sounds..."].trigger()
+    first = app.window
+    check(first is not None and first.isVisible()
+          and first.stack.currentWidget() is first.lab,
+          "Cue sounds... opens the window on the sounds page",
+          type(first.stack.currentWidget()).__name__ if first else "no window")
+    actions["Recent dictations..."].trigger()
+    check(app.window is first and first.stack.currentWidget() is first.recent_page,
+          "Recent dictations... switches that same window, not a second one",
+          type(app.window.stack.currentWidget()).__name__)
+    check(first.recent_page.recent is app.recent,
+          "and its list reads the store Shout fills, not a copy")
+    first.close()
+    actions["Recent dictations..."].trigger()
+    check(app.window is not first and app.window.isVisible(),
+          "a closed window is rebuilt on the next open, reading the config afresh")
+    app.window.close()
+
+    app.tray.icon.activated.emit(TRIGGER)
+    check(inj.get_clipboard_text() == SENTINEL and notices == ["Nothing dictated yet"],
+          "a left click before any dictation leaves the clipboard alone, and says so",
+          f"notices={notices}")
 
     app.overlay.build()
     stage("main: qapp.exec()")
@@ -245,6 +365,10 @@ def main() -> int:
         time.sleep(0.05)
     check(not alive, "no non-daemon thread outlives the quit (the process can exit)",
           f"still alive: {[t.name for t in alive]}")
+
+    if borrowed is not None:
+        # Private: the gate cannot know whether what it borrowed was a password.
+        inj.set_clipboard_text(borrowed, private=True)
 
     for ok, name, detail in rows:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if detail else ""))

@@ -14,9 +14,6 @@ from __future__ import annotations
 
 import collections
 import logging
-import subprocess
-import sys
-from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -24,38 +21,8 @@ log = logging.getLogger(__name__)
 
 POLL_MS = 120
 
-CUE_LAB = Path(__file__).resolve().parent.parent / "scripts" / "cue_lab.py"
-
-# DETACHED_PROCESS: the lab outlives Shout and must not die with it, and must
-# not inherit a console it could pop open.
-_DETACHED = 0x00000008 | 0x00000200 | 0x08000000     # + NEW_PROCESS_GROUP, NO_WINDOW
-
-
-def cue_lab_exe() -> str:
-    """The GUI-subsystem interpreter, preferred over whatever launched us.
-
-    uv installed its CONSOLE trampoline as both python.exe and pythonw.exe on
-    this machine, so `sys.executable` opens a terminal when Shout was started
-    from one. `shoutw.exe` beside it is the real windowed launcher."""
-    windowed = Path(sys.executable).with_name("shoutw.exe")
-    return str(windowed if windowed.exists() else sys.executable)
-
-
-def launch_cue_lab() -> bool:
-    """Fire and forget. Never waited on — see the lab note about awaiting a
-    child's close with no timeout."""
-    if not CUE_LAB.exists():
-        log.error("cue lab not found at %s", CUE_LAB)
-        return False
-    try:
-        subprocess.Popen([cue_lab_exe(), str(CUE_LAB)], cwd=str(CUE_LAB.parent.parent),
-                         creationflags=_DETACHED, close_fds=True)
-        log.info("opened the cue lab (%s)", cue_lab_exe())
-        return True
-    except Exception:
-        log.exception("could not open the cue lab")
-        return False
-
+# The left click does nothing you can see, so the tooltip is where it is found.
+CLICK_HINT = "\nClick to copy your last dictation"
 
 # state -> (fill, ring or None)
 _COLORS = {
@@ -99,15 +66,18 @@ def _icon(state: str) -> QtGui.QIcon:
 
 
 class Tray:
-    def __init__(self, on_quit) -> None:
+    def __init__(self, on_quit, on_open, on_click) -> None:
+        """`on_open(page)` shows the Shout window on "recent" or "sounds";
+        `on_click()` is a left click on the icon. Both run on the GUI thread."""
         self._on_quit = on_quit
+        self._on_open = on_open
+        self._on_click = on_click
         self._state = "loading"        # written by any thread
         self._applied = None           # what the icon currently shows
         self._stopped = False
         self._pending: collections.deque[tuple[str, str]] = collections.deque()
         self.icon: QtWidgets.QSystemTrayIcon | None = None
         self._menu: QtWidgets.QMenu | None = None
-        self.cue_action: QtGui.QAction | None = None
         self._timer: QtCore.QTimer | None = None
 
     # -- called from other threads (attribute rebind / deque append) --------
@@ -122,13 +92,16 @@ class Tray:
 
     def build(self) -> None:
         self.icon = QtWidgets.QSystemTrayIcon(_icon("loading"))
-        self.icon.setToolTip(_LABELS["loading"])
+        self.icon.setToolTip(_LABELS["loading"] + CLICK_HINT)
+        self.icon.activated.connect(self._activated)
         menu = QtWidgets.QMenu()
-        # The tray is the only surface Shout has, so anything you might want to
-        # open has to be reachable from here — a script you have to remember the
-        # path of is not reachable.
-        self.cue_action = menu.addAction("Cue sounds...")
-        self.cue_action.triggered.connect(lambda _checked=False: launch_cue_lab())
+        # The tray is the only way into Shout, so anything you might want to open
+        # has to be reachable from here. Both entries open the same window, on
+        # the page they name.
+        for text, page in (("Recent dictations...", "recent"),
+                           ("Cue sounds...", "sounds")):
+            action = menu.addAction(text)
+            action.triggered.connect(lambda _checked=False, p=page: self._on_open(p))
         menu.addSeparator()
         quit_action = menu.addAction("Quit Shout")
         quit_action.triggered.connect(lambda _checked=False: self._on_quit())
@@ -141,6 +114,12 @@ class Tray:
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_MS)
 
+    def _activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        # Trigger is a left click. A double click delivers one Trigger first,
+        # which is enough, and a right click only opens the menu.
+        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
+            self._on_click()
+
     def _tick(self) -> None:
         if self._stopped:
             return
@@ -148,7 +127,7 @@ class Tray:
             if self._state != self._applied:
                 self._applied = self._state
                 self.icon.setIcon(_icon(self._state))
-                self.icon.setToolTip(_LABELS.get(self._state, "Shout"))
+                self.icon.setToolTip(_LABELS.get(self._state, "Shout") + CLICK_HINT)
             while self._pending:
                 title, message = self._pending.popleft()
                 self.icon.showMessage(title, message, _icon(self._state), 5000)

@@ -47,7 +47,8 @@ class Config:
     cue_volume: float = 0.25         # 0.0-1.0, amplitude of the synthesized tones
     # How those three gestures sound. `cue_preset` names a material in
     # shout.cues.PRESETS; `cue_voice` overrides individual fields on top of it.
-    # Both are what `scripts/cue_lab.py` writes when you save an audition.
+    # Both are what the cue lab (`shout/window.py`) writes when you save an
+    # audition.
     cue_preset: str = "blip"
     cue_voice: dict = field(default_factory=dict)
     # Voices saved under a name of their own, name -> the voice's full field

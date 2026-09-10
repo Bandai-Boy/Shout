@@ -1,11 +1,21 @@
-"""Audition the cue sounds and save the one you like, under a name of its own.
+"""The Shout window: your recent dictations, and the cue sounds.
 
-    .venv/Scripts/shoutw.exe scripts/cue_lab.py
+Two pages of one window, opened from the tray icon's menu. It lives inside
+Shout's own process, not beside it the way the cue lab used to, because that is
+where the recent dictations are. They are kept in memory only (see
+`shout/recent.py`), and a second process could only see them if they were
+written down somewhere.
 
-`shoutw.exe`, not `pythonw.exe`: uv installed its CONSOLE trampoline under both
-names on this machine (PE subsystem 3, byte-identical to python.exe), so
-pythonw would open a terminal window beside the lab. See the 8 Sep lab note.
+## Recent dictations
 
+The last few transcripts, newest first, each with a Copy button: for the paste
+that landed nowhere because you clicked out of the field. Copy marks the
+clipboard private, the same as a dictation does. The store is filled on the
+commit thread and polled here, one int per tick, so no signal crosses threads.
+
+## Cue sounds
+
+Audition the cue sounds and save the one you like, under a name of its own.
 Pick a material, drag a slider, hear it the moment you let go. Nothing is written
 until you press Save, and Save only touches the cue keys in config.json — every
 other setting is left as it is.
@@ -79,19 +89,17 @@ from __future__ import annotations
 
 import ctypes
 import json
-import sys
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
+from PySide6 import QtCore, QtGui, QtWidgets
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
-
-from shout.config import Config, config_dir  # noqa: E402
-from shout.cues import (MAX_GESTURE_S, PRESETS, Cues, Voice,  # noqa: E402
-                        build, duration_s, notes)
+from .config import Config, config_dir
+from .cues import MAX_GESTURE_S, PRESETS, Cues, Voice, build, duration_s, notes
+from .inject import set_clipboard_text
+from .recent import SIZE, Entry, Recent
 
 # Ember Dusk, from vendor-vault-themes.md. TEXT_MUTED and the raw VV negative are
 # deliberately absent from every readable-text role — see the module docstring.
@@ -103,6 +111,7 @@ C = {
     "accent": "#ff7043", "warm": "#ffab40", "pop": "#e91e8c", "soft": "#ff8a65",
     "text": "#f5e6d3", "label": "#c4a882", "disabled": "#8a6f5a",
     "negative": "#ff7b73",
+    "tab": "rgba(255,112,67,0.16)", "tab_border": "rgba(255,112,67,0.45)",
     # CTA gradient is hardcoded in VV and does not follow the theme.
     "cta_a": "#6D28D9", "cta_b": "#3B82F6",
 }
@@ -131,14 +140,13 @@ QSS = f"""
     border: 1px solid {C['border']};
     border-radius: 16px;
 }}
-#tile {{
+#tile, #entry {{
     background: {C['fill']};
     border: 1px solid {C['border']};
     border-radius: 10px;
 }}
 QLabel {{ color: {C['text']}; background: transparent; }}
-#h1 {{ color: {C['text']}; }}
-#sub, #section, #knob, #tileLabel {{ color: {C['label']}; }}
+#sub, #section, #knob, #tileLabel, #when {{ color: {C['label']}; }}
 #value {{ color: {C['text']}; }}
 #status {{ color: {C['label']}; }}
 
@@ -221,6 +229,30 @@ QSlider::handle:horizontal:hover {{ background: #ffffff; border: 2px solid {C['w
    time. State goes after the subcontrol. */
 QSlider::handle:horizontal:focus {{ border: 2px solid {C['warm']};
                                     background: #ffffff; }}
+
+/* The page switch: two halves of one control, so it reads as a choice of view
+   rather than as two buttons that do something. */
+#switch {{
+    background: {C['fill']};
+    border: 1px solid {C['border']};
+    border-radius: 12px;
+}}
+QPushButton#seg {{
+    background: transparent; border: 1px solid transparent; border-radius: 9px;
+    color: {C['label']}; padding: 0 14px; min-height: 30px;
+}}
+QPushButton#seg:hover {{ background: {C['fill_hover']}; color: {C['text']}; }}
+QPushButton#seg:checked {{ background: {C['tab']}; border: 1px solid {C['tab_border']};
+                           color: {C['text']}; }}
+QPushButton#seg:focus {{ border: 1px solid {C['warm']}; }}
+
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px 0; }}
+QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.18); border-radius: 4px;
+                               min-height: 28px; }}
+QScrollBar::handle:vertical:hover {{ background: rgba(255,255,255,0.28); }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
 """
 
 
@@ -496,9 +528,10 @@ class Card(QtWidgets.QFrame):
 
 
 class Lab(QtWidgets.QWidget):
+    """The cue sounds page. Transparent: `Window` paints what shows through."""
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Shout — cue lab")
         self.cfg = Config.load()
         self.saved: dict[str, dict] = dict(self.cfg.cue_presets)
         self.voice = Voice.resolve(self.cfg.cue_preset, self.cfg.cue_voice,
@@ -507,7 +540,6 @@ class Lab(QtWidgets.QWidget):
         self.cues = Cues(enabled=True, volume=self.volume,
                          device=self.cfg.output_device, voice=self.voice)
         self._loading = False
-        self.setStyleSheet(QSS)
         self._build_ui()
         self._rebuild_list()
         self._sync_widgets()
@@ -526,46 +558,17 @@ class Lab(QtWidgets.QWidget):
                 f"saved under a name — Save to keep them as "
                 f"{self.name.text()!r}, or rename first.")
 
-    # -- background ----------------------------------------------------------
-
-    def paintEvent(self, _e: QtGui.QPaintEvent) -> None:
-        """VV's body: a deep base plus four radial blobs. Painted rather than
-        set as a flat colour because the cards above it are translucent — with a
-        flat base they read as grey boxes, and the blobs ARE the depth that
-        `backdrop-filter` would otherwise be providing."""
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        w, h = self.width(), self.height()
-        p.fillRect(self.rect(), QtGui.QColor(C["deep"]))
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-        for fx, fy, radius, colour in BLOBS:
-            grad = QtGui.QRadialGradient(0.0, 0.0, radius * max(w, h))
-            grad.setColorAt(0.0, rgba(colour))
-            grad.setColorAt(1.0, QtGui.QColor(colour[0], colour[1], colour[2], 0))
-            p.save()
-            p.translate(w * fx, h * fy)
-            p.scale(1.35, 1.0)                   # CSS `ellipse at ...`
-            p.setBrush(QtGui.QBrush(grad))
-            p.drawEllipse(QtCore.QPointF(0, 0), radius * max(w, h),
-                          radius * max(w, h))
-            p.restore()
-        p.end()
-
     # -- ui ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(12)
 
-        heading = QtWidgets.QLabel("Cue sounds")
-        heading.setObjectName("h1")
-        heading.setFont(tracked(15, 0.0, bold=True))
         subtitle = QtWidgets.QLabel("Three gestures, one voice. Nothing is saved "
                                     "until you press Save.")
         subtitle.setObjectName("sub")
         subtitle.setFont(tracked(8.5))
-        outer.addWidget(heading)
         outer.addWidget(subtitle)
 
         # -- material, waveform, readout --
@@ -690,13 +693,6 @@ class Lab(QtWidgets.QWidget):
         save_card.box.addWidget(self.status)
         outer.addWidget(save_card)
         outer.addStretch(1)
-
-        # Sized FROM the layout's own minimum, not from a number that looked
-        # right: at 736 every label was rendering 4-5px under its minimumSizeHint
-        # -- legible at this DPI, clipped at another -- and a hand-picked
-        # minimumSize of 700 let the window be dragged further into that. Qt
-        # enforces the layout minimum on its own once nothing overrides it.
-        self.resize(600, self.sizeHint().height())
 
     def _rebuild_list(self) -> None:
         """Materials first, then your own voices under a separator. Rebuilt
@@ -926,27 +922,240 @@ class Lab(QtWidgets.QWidget):
         self._apply(play="start")
         self.status.setText(f"Deleted {name!r}. Now on 'blip'.")
 
+
+class EntryRow(QtWidgets.QFrame):
+    """One dictation: when, what, and Copy. Long text is shown clipped, so one
+    long hands-free take cannot push the rest of the list off the card; Copy
+    always takes the whole of it."""
+
+    SHOWN_CHARS = 280
+
+    def __init__(self, entry: Entry, on_copy) -> None:
+        super().__init__()
+        self.setObjectName("entry")
+        self.entry = entry
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(14, 10, 10, 10)
+        row.setSpacing(12)
+        words = QtWidgets.QVBoxLayout()
+        words.setSpacing(3)
+        when = QtWidgets.QLabel(time.strftime("%I:%M %p",
+                                              time.localtime(entry.at)).lstrip("0"))
+        when.setObjectName("when")
+        when.setFont(tracked(7.5, 1.0, bold=True))
+        shown = entry.text
+        if len(shown) > self.SHOWN_CHARS:
+            shown = shown[:self.SHOWN_CHARS].rstrip() + "…"
+        self.text = QtWidgets.QLabel(shown)
+        self.text.setFont(tracked(9.5))
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        words.addWidget(when)
+        words.addWidget(self.text)
+        row.addLayout(words, 1)
+        self.copy = QtWidgets.QPushButton("Copy")
+        self.copy.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.copy.setAccessibleName("Copy this dictation")
+        self.copy.clicked.connect(lambda _=False: on_copy(entry))
+        row.addWidget(self.copy, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+
+class RecentPage(QtWidgets.QWidget):
+    """The recent dictations page, newest first."""
+
+    POLL_MS = 250
+
+    def __init__(self, recent: Recent) -> None:
+        super().__init__()
+        self.recent = recent
+        self._version = -1                  # the store version on screen
+        self.shown: list[EntryRow] = []
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        subtitle = QtWidgets.QLabel(f"Your last {SIZE} dictations, newest first. "
+                                    "Kept in memory only, and forgotten when Shout "
+                                    "quits.")
+        subtitle.setObjectName("sub")
+        subtitle.setFont(tracked(8.5))
+        outer.addWidget(subtitle)
+
+        card = Card()
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(section("Dictations"))
+        head.addStretch(1)
+        self.clear = QtWidgets.QPushButton("Clear")
+        self.clear.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.clear.clicked.connect(self._clear)
+        head.addWidget(self.clear)
+        card.box.addLayout(head)
+
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QtWidgets.QWidget()
+        self.rows = QtWidgets.QVBoxLayout(body)
+        self.rows.setContentsMargins(0, 0, 0, 0)
+        self.rows.setSpacing(8)
+        self.empty = QtWidgets.QLabel("Nothing yet. Every dictation lands here as "
+                                      "well as at your cursor.")
+        self.empty.setObjectName("sub")
+        self.empty.setFont(tracked(9))
+        self.empty.setWordWrap(True)
+        self.rows.addWidget(self.empty)
+        self.scroll.setWidget(body)
+        # Both, or the blobs stop at the list: the viewport and the widget inside
+        # it each fill their own background by default.
+        self.scroll.viewport().setAutoFillBackground(False)
+        body.setAutoFillBackground(False)
+        card.box.addWidget(self.scroll, 1)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setObjectName("status")
+        self.status.setFont(tracked(8.5))
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(30)
+        card.box.addWidget(self.status)
+        outer.addWidget(card, 1)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start(self.POLL_MS)
+        self.refresh()
+
+    def refresh(self) -> None:
+        version = self.recent.version
+        if version == self._version:
+            return
+        # The version is read BEFORE the entries, so a dictation landing in
+        # between is on screen a tick early, never a tick late.
+        self._version = version
+        entries = self.recent.newest_first()
+        while self.rows.count() > 1:            # everything but the empty label
+            widget = self.rows.takeAt(1).widget()
+            if widget is not None:
+                # Hidden first: a row out of the layout but not yet deleted
+                # still paints where it was.
+                widget.hide()
+                widget.deleteLater()
+        self.shown = [EntryRow(entry, self._copy) for entry in entries]
+        for row in self.shown:
+            self.rows.addWidget(row)
+        self.rows.addStretch(1)
+        self.empty.setVisible(not entries)
+        self.clear.setEnabled(bool(entries))
+
+    def _copy(self, entry: Entry) -> None:
+        if set_clipboard_text(entry.text):
+            self.status.setText("Copied. Click where it goes and press Ctrl+V.")
+        else:
+            self.status.setText("Another app is holding the clipboard. Try again.")
+
+    def _clear(self) -> None:
+        self.recent.clear()
+        self.refresh()
+        self.status.setText("Cleared.")
+
+
+class Window(QtWidgets.QWidget):
+    """Both pages, switched at the top. Shout builds a fresh one each time it is
+    opened after being closed, so the sounds page reads config.json as it is
+    now, not as it was the first time."""
+
+    PAGES = ("recent", "sounds")
+
+    def __init__(self, recent: Recent, page: str = "recent") -> None:
+        super().__init__()
+        self.setWindowTitle("Shout")
+        self.setStyleSheet(QSS)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(14)
+
+        switch = QtWidgets.QFrame()
+        switch.setObjectName("switch")
+        segs = QtWidgets.QHBoxLayout(switch)
+        segs.setContentsMargins(3, 3, 3, 3)
+        segs.setSpacing(2)
+        group = QtWidgets.QButtonGroup(self)
+        self.tabs: dict[str, QtWidgets.QPushButton] = {}
+        for key, text in zip(self.PAGES, ("Recent dictations", "Cue sounds")):
+            tab = QtWidgets.QPushButton(text)
+            tab.setObjectName("seg")
+            tab.setCheckable(True)
+            # Keyboard focus only: a clicked tab that keeps a focus ring reads
+            # as a second highlight laid over the checked one.
+            tab.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+            tab.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            tab.clicked.connect(lambda _=False, k=key: self.show_page(k))
+            group.addButton(tab)
+            segs.addWidget(tab)
+            self.tabs[key] = tab
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(switch)
+        top.addStretch(1)
+        outer.addLayout(top)
+
+        self.recent_page = RecentPage(recent)
+        self.lab = Lab()
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.addWidget(self.recent_page)
+        self.stack.addWidget(self.lab)
+        outer.addWidget(self.stack, 1)
+        self.show_page(page)
+
+        # Sized FROM the layout's own minimum, not from a number that looked
+        # right: at 736 every label was rendering 4-5px under its minimumSizeHint
+        # -- legible at this DPI, clipped at another -- and a hand-picked
+        # minimumSize of 700 let the window be dragged further into that. Qt
+        # enforces the layout minimum on its own once nothing overrides it. The
+        # stack takes its tallest page, so switching pages never resizes it.
+        self.resize(600, self.sizeHint().height())
+
+    def show_page(self, key: str) -> None:
+        self.stack.setCurrentWidget(self.recent_page if key == "recent" else self.lab)
+        self.tabs[key].setChecked(True)
+
+    def paintEvent(self, _e: QtGui.QPaintEvent) -> None:
+        """VV's body: a deep base plus four radial blobs. Painted rather than
+        set as a flat colour because the cards above it are translucent — with a
+        flat base they read as grey boxes, and the blobs ARE the depth that
+        `backdrop-filter` would otherwise be providing."""
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), QtGui.QColor(C["deep"]))
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        for fx, fy, radius, colour in BLOBS:
+            grad = QtGui.QRadialGradient(0.0, 0.0, radius * max(w, h))
+            grad.setColorAt(0.0, rgba(colour))
+            grad.setColorAt(1.0, QtGui.QColor(colour[0], colour[1], colour[2], 0))
+            p.save()
+            p.translate(w * fx, h * fy)
+            p.scale(1.35, 1.0)                   # CSS `ellipse at ...`
+            p.setBrush(QtGui.QBrush(grad))
+            p.drawEllipse(QtCore.QPointF(0, 0), radius * max(w, h),
+                          radius * max(w, h))
+            p.restore()
+        p.end()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        self.cues.close()
+        # The sounds page holds an output stream for as long as it exists, and
+        # closing the window no longer ends a process that would release it.
+        self.lab.cues.close()
         super().closeEvent(event)
 
 
 def application(argv: list[str]) -> QtWidgets.QApplication:
-    """The QApplication as the lab runs it, and as probe_lab builds it too. The
+    """The QApplication as Shout runs it, and as the gates build it too. The
     style decides how a slider takes a click: Windows 11's jumps to it, Fusion's
     steps toward it. So a gate left on the default style passed a jump the lab
-    never made."""
+    never made. App-wide, now that this window shares Shout's process, which
+    means the tray menu is drawn by Fusion as well."""
     app = QtWidgets.QApplication(argv)
     app.setStyle("Fusion")
     return app
-
-
-def main() -> int:
-    app = application(sys.argv)
-    lab = Lab()
-    lab.show()
-    return app.exec()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
