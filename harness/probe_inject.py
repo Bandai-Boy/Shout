@@ -41,6 +41,16 @@ def check(ok: bool, name: str, detail: str = "") -> None:
     RESULTS.append((bool(ok), name, detail))
 
 
+user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+
+
+def clipboard_is_private() -> bool:
+    """Whether the clipboard carries the marker that keeps it out of Clipboard
+    History and the cloud clipboard. Needs no OpenClipboard."""
+    fmt = user32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing")
+    return bool(fmt) and bool(user32.IsClipboardFormatAvailable(fmt))
+
+
 class Target:
     """A focusable window whose text can be read back."""
 
@@ -144,8 +154,10 @@ def main() -> int:
               repr(got2[:50]))
 
         # --- clipboard restore ----------------------------------------
+        # The sentinel is copied PRIVATE, the way a password manager copies a
+        # password, because that is the case the restore must not leak.
         sentinel = "user-clipboard-sentinel-" + str(int(time.time()))
-        inj.set_clipboard_text(sentinel, private=False)
+        inj.set_clipboard_text(sentinel, private=True)
         target.clear()
         inj.inject("transient transcript", cfg)
         target.wait_for_text()
@@ -156,8 +168,16 @@ def main() -> int:
             if restored == sentinel:
                 break
             target.pump(0.05)
+        restored_private = clipboard_is_private()
         check(restored == sentinel, "the user's previous clipboard is put back",
               repr((restored or "")[:40]))
+        check(restored_private,
+              "a private clipboard is still private after the restore",
+              "or a copied password lands in Clipboard History after dictation")
+        inj.set_clipboard_text("unmarked", private=False)
+        check(not clipboard_is_private(),
+              "CONTROL: an unmarked clipboard reads as not private",
+              "proves the row above can see a leak")
 
         # --- empty input ----------------------------------------------
         check(inj.inject("   ", cfg) == "empty", "whitespace-only text is not injected")
@@ -165,7 +185,9 @@ def main() -> int:
     finally:
         target.close()
         if original is not None:
-            inj.set_clipboard_text(original, private=False)
+            # Private for the same reason as inject's own restore: the probe
+            # cannot know whether what it borrowed was a password.
+            inj.set_clipboard_text(original, private=True)
 
     return _report()
 

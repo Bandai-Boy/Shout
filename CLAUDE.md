@@ -372,3 +372,16 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   anything about widget BEHAVIOUR in a probe, check that the probe builds the
   app the way `main()` does. I had read both and not connected them, and it was
   the stock-widget control that paid for it.
+
+- [2026-09-10] The pre-open-source sweep found **the clipboard restore leaking
+  private copies**. `_restore_later` put the previous clipboard back with
+  `private=False`, so a password a manager had copied private (kept out of Win+V
+  history and the cloud clipboard) came back as plain text 300ms after every
+  dictation. The write path had carried the markers from day one, which is
+  exactly what made the restore path easy to miss. Restore is now
+  `private=True`, which costs nothing, since the original copy already made its
+  own history entry if it was allowed one. `probe_inject`'s own cleanup had the
+  same bug. The gate copies its sentinel private and asserts the marker
+  survives; swapping in the pre-fix `inject.py` fails exactly that row, 10/11.
+  -> Anything that borrows the clipboard must hand it back with the privacy it
+  arrived with. Audit the restore path, not just the write.

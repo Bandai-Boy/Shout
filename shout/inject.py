@@ -148,7 +148,12 @@ def _restore_later(ours: str, previous: str, delay_s: float) -> None:
         # Only put the old content back if ours is still there — if the user
         # copied something in the meantime, leave their copy alone.
         if get_clipboard_text() == ours:
-            set_clipboard_text(previous, private=False)
+            # Private, because it may have been private when it was copied: a
+            # password manager marks a copied password out of Clipboard History
+            # and the cloud clipboard, and restoring it unmarked re-published it
+            # after every dictation. Marking costs nothing, since the original
+            # copy already made its own history entry if it was allowed one.
+            set_clipboard_text(previous, private=True)
     threading.Timer(delay_s, restore).start()
 
 
