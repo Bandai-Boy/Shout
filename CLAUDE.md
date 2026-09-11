@@ -138,6 +138,13 @@ to `probe_stuck.py`, which physically holds the chord to fake a dead hook.
 
 Observed 8 Sep 2026: leaving Shout running fails the **inject** gate specifically.
 
+`probe_overlay` also moves the real mouse pointer to the centre of every screen,
+~0.2s each, and puts it back, because since 10 Sep the pill follows the mouse's
+monitor rather than the focused window's. Keep hands off the mouse while the
+suite runs: a failing `screen N: the cursor could be moved there` row means
+something else moved the pointer, not a placement bug. Only a screen WITHOUT
+the focused window can tell the two rules apart, so one monitor prints SKIP.
+
 ## Gotcha: run the gates from a real terminal, not a detached launcher
 
 `probe_hook`, `probe_stuck` and `probe_overlay` all depend on the launching

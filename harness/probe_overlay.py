@@ -14,6 +14,7 @@ off the real window, so a future Qt version quietly changing that mapping fails
 here instead of failing as dictation that goes nowhere.
 
 Run with Shout quit — two pills on screen make the placement rows meaningless.
+It moves the real mouse pointer to each screen for ~0.2s and puts it back.
 """
 from __future__ import annotations
 
@@ -38,6 +39,8 @@ from shout.overlay import (BAR_MAX_H, COLLAPSED_H, COLLAPSED_W, DOT_INSET,  # no
 
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 HWND_TOP = wintypes.HWND(0)
 HWND_NOTOPMOST = wintypes.HWND(-2)
 
@@ -195,6 +198,44 @@ def main() -> int:
           f"left={r.left} expected={expected_x}")
     check((r.right - r.left, r.bottom - r.top) == (WIN_W, WIN_H),
           "window size is as declared", f"{r.right - r.left}x{r.bottom - r.top}")
+
+    # -- follows the mouse, not focus ---------------------------------------
+    # The real cursor visits the centre of every screen and is put back. The
+    # expected spot comes from that screen's own geometry, never from
+    # work_area(), which is the code under test. Only a screen NOT holding the
+    # focused window can tell mouse-following from focus-following, so those
+    # are counted, and one monitor reports SKIP rather than a pass.
+    ov.set_state("idle")
+    fr = rect(int(user32.GetForegroundWindow()))
+    focus_scr = QtGui.QGuiApplication.screenAt(
+        QtCore.QPoint((fr.left + fr.right) // 2, (fr.top + fr.bottom) // 2))
+    focus_name = focus_scr.name() if focus_scr is not None else None
+    home = QtGui.QCursor.pos()
+    exercised = 0
+    try:
+        for i, scr in enumerate(QtGui.QGuiApplication.screens()):
+            QtGui.QCursor.setPos(scr.geometry().center())
+            spin(0.2)
+            under = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+            if under is None or under.name() != scr.name():
+                check(False, f"screen {i}: the cursor could be moved there",
+                      f"cursor at {QtGui.QCursor.pos().toTuple()}")
+                continue
+            a, r = scr.availableGeometry(), rect(hwnd)
+            want = (a.left() + (a.width() - WIN_W) // 2,
+                    a.bottom() + 1 - MARGIN_Y + SHADOW - WIN_H)
+            away = scr.name() != focus_name
+            exercised += away
+            check(abs(r.left - want[0]) <= 1 and abs(r.top - want[1]) <= 1,
+                  f"screen {i}: the pill follows the mouse there",
+                  f"at ({r.left},{r.top}) want {want}"
+                  + ("; focus is on another screen" if away else "; focus is here too"))
+    finally:
+        QtGui.QCursor.setPos(home)
+        spin(0.2)
+    follow_skip = "" if exercised else (
+        "SKIP: every screen holds the focused window (one monitor?), so the "
+        "rows above cannot tell mouse-following from focus-following")
 
     # -- persistence: the change from session 2 -----------------------------
     for state, want in (("idle", True), ("loading", True), ("latched", True),
@@ -378,6 +419,8 @@ def main() -> int:
     for ok, name, detail in rows:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if detail else ""))
     passed = sum(ok for ok, _, _ in rows)
+    if follow_skip:
+        print(f"  [skip] {follow_skip}")
     print(f"  [{'ok' if control else 'FAIL'}] CONTROL: an activating window was "
           f"seen stealing focus")
 

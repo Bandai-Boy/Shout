@@ -127,7 +127,7 @@ git config core.hooksPath hooks             # turn on the commit guard (the repo
 
 **Run them from an ordinary terminal.** Several gates need the foreground rights Windows gives a program started from the active window.
 
-**Expect them to take over briefly.** A test window opens and gets typed into, focus moves for a moment, test tones play, and your default speakers and microphone are switched for about 3 seconds and then put back.
+**Expect them to take over briefly.** A test window opens and gets typed into, focus moves for a moment, the mouse pointer visits each screen and is put back, test tones play, and your default speakers and microphone are switched for about 3 seconds and then put back.
 
 The commit guard refuses to commit recordings, transcripts, or any file over 1 MB.
 

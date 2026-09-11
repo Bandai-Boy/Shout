@@ -72,8 +72,6 @@ FULLSCREEN_STATES = (QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_
 
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
-user32.GetForegroundWindow.restype = wintypes.HWND
-user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 shell32.SHQueryUserNotificationState.argtypes = [ctypes.POINTER(ctypes.c_int)]
 
 _get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
@@ -533,19 +531,13 @@ class Overlay:
     # -- placement ----------------------------------------------------------
 
     def _screen(self) -> QtGui.QScreen:
-        """The screen holding the focused window — not the primary one. Qt's
-        availableGeometry already excludes the taskbar wherever it lives, and
-        was measured to agree exactly with Win32's rcWork on this setup."""
-        fg = user32.GetForegroundWindow()
-        if fg:
-            r = wintypes.RECT()
-            if user32.GetWindowRect(fg, ctypes.byref(r)):
-                mid = QtCore.QPoint((r.left + r.right) // 2,
-                                    (r.top + r.bottom) // 2)
-                scr = QtGui.QGuiApplication.screenAt(mid)
-                if scr is not None:
-                    return scr
-        return QtGui.QGuiApplication.primaryScreen()
+        """The screen the mouse is on, not the one holding the focused window:
+        moving the mouse to the other monitor brings the pill with it before
+        anything is clicked there. Qt's availableGeometry already excludes the
+        taskbar wherever it lives, and was measured to agree exactly with
+        Win32's rcWork on this setup."""
+        scr = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+        return scr if scr is not None else QtGui.QGuiApplication.primaryScreen()
 
     def work_area(self) -> QtCore.QRect:
         return self._screen().availableGeometry()
