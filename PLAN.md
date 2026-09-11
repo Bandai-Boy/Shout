@@ -295,6 +295,8 @@ with your eyes. Nothing else from the old session 2 list was built.
 - [x] The overlay never takes focus, never appears in alt-tab, never eats a click.
 - [x] It sits on the monitor the mouse is on, against the work area. (Until 10 Sep it
   followed the focused window; Gabe preferred Wispr Flow's follow-the-mouse.)
+- [x] While idle it hides only on a monitor a fullscreen window covers, and shows on
+  the others. (Until 10 Sep the hide was global, and blind to the second monitor.)
 - [x] The app still starts, runs and **exits** with two GUI event loops in one process.
 
 ### Measured, 8 Sep 2026

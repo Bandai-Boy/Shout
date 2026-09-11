@@ -35,12 +35,10 @@ from shout.overlay import (BAR_MAX_H, COLLAPSED_H, COLLAPSED_W, DOT_INSET,  # no
                            SHADOW, SWP_RESTACK, WANTED_EXSTYLE, WIN_H, WIN_W,
                            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
                            WS_EX_TRANSPARENT, Overlay, _get_long, expanded_width,
-                           fullscreen_app_running, user32)
+                           fullscreen_monitors, notification_state, user32)
 
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
-user32.GetForegroundWindow.restype = wintypes.HWND
-user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 HWND_TOP = wintypes.HWND(0)
 HWND_NOTOPMOST = wintypes.HWND(-2)
 
@@ -75,6 +73,17 @@ def rect(hwnd: int) -> wintypes.RECT:
 
 def visible(hwnd: int) -> bool:
     return bool(user32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def on_screen(hwnd: int, scr: QtGui.QScreen) -> bool:
+    r = rect(hwnd)
+    return scr.geometry().contains(QtCore.QPoint((r.left + r.right) // 2,
+                                                 (r.top + r.bottom) // 2))
+
+
+def monitor_at(scr: QtGui.QScreen) -> int:
+    c = scr.geometry().center()
+    return user32.MonitorFromPoint(wintypes.POINT(c.x(), c.y()), 2) or 0
 
 
 def stacked_above(upper: int, lower: int) -> bool:
@@ -237,6 +246,73 @@ def main() -> int:
         "SKIP: every screen holds the focused window (one monitor?), so the "
         "rows above cannot tell mouse-following from focus-following")
 
+    # -- fullscreen hides the pill on that screen only ----------------------
+    # A black fullscreen window goes up on a screen WITHOUT the focused window
+    # and never takes focus: a video left fullscreen while you work on the
+    # other monitor. SHQueryUserNotificationState answered ACCEPTS for exactly
+    # this (10 Sep 2026), so the old global check never hid the pill at all.
+    screens = QtGui.QGuiApplication.screens()
+    fs_scr = next((s for s in screens if s.name() != focus_name), None)
+    other = next((s for s in screens
+                  if fs_scr is not None and s.name() != fs_scr.name()), None)
+    fs_skip = ""
+    if fs_scr is None or other is None:
+        fs_skip = ("SKIP: one screen, so the fullscreen rows cannot show the pill "
+                   "leaving the fullscreen screen for another")
+    else:
+        fsw = QtWidgets.QWidget()
+        fsw.setStyleSheet("background: black;")
+        fsw.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        fsw.create()
+        fsw.windowHandle().setScreen(fs_scr)
+        fsw.move(fs_scr.geometry().topLeft())
+        fs_mon = monitor_at(fs_scr)
+        home = QtGui.QCursor.pos()
+        ov.set_state("idle")
+        try:
+            QtGui.QCursor.setPos(other.geometry().center())
+            fsw.showFullScreen()
+            user32.SetWindowPos(wintypes.HWND(int(fsw.winId())), HWND_TOP,
+                                0, 0, 0, 0, SWP_RESTACK)
+            spin(0.7)                                   # at least one 0.5s poll
+            found = fullscreen_monitors()
+            check(found == {fs_mon}, "only the fullscreen window's monitor reads as fullscreen",
+                  f"found {sorted(found)} want [{fs_mon}]; "
+                  f"the shell's own answer is {notification_state()}")
+            check(visible(hwnd) and on_screen(hwnd, other),
+                  "idle pill stays up on the other screen")
+            QtGui.QCursor.setPos(fs_scr.geometry().center())
+            shown_there = False
+            end = time.perf_counter() + 0.3
+            while time.perf_counter() < end:
+                app.processEvents()
+                shown_there |= visible(hwnd) and on_screen(hwnd, fs_scr)
+                QtCore.QThread.msleep(2)
+            check(not visible(hwnd), "idle pill hides when the mouse moves onto the "
+                  "fullscreen screen")
+            check(not shown_there, "and is never shown there on the way",
+                  "sampled every ~2ms for 0.3s")
+            ov.set_state("recording")
+            spin(0.2)
+            check(visible(hwnd) and on_screen(hwnd, fs_scr),
+                  "recording still shows over the fullscreen window")
+            ov.set_state("idle")
+            spin(0.1)
+            QtGui.QCursor.setPos(other.geometry().center())
+            spin(0.2)
+            check(visible(hwnd) and on_screen(hwnd, other),
+                  "idle pill comes back on the other screen")
+            QtGui.QCursor.setPos(fs_scr.geometry().center())
+            fsw.hide()
+            spin(0.7)
+            check(visible(hwnd) and on_screen(hwnd, fs_scr),
+                  "and returns to that screen once the fullscreen window closes")
+        finally:
+            fsw.hide()
+            fsw.deleteLater()
+            QtGui.QCursor.setPos(home)
+            spin(0.2)
+
     # -- persistence: the change from session 2 -----------------------------
     for state, want in (("idle", True), ("loading", True), ("latched", True),
                         ("working", True), ("recording", True)):
@@ -347,8 +423,8 @@ def main() -> int:
           "feedback matters most exactly when something is covering the screen")
     check(ov._visible_for("working") is True, "still shows while transcribing")
     ov._fullscreen = False
-    check(isinstance(fullscreen_app_running(), bool),
-          "SHQueryUserNotificationState answers")
+    check(1 <= notification_state() <= 7, "SHQueryUserNotificationState answers",
+          f"state {notification_state()}")
 
     # -- the ex-style survives a full cycle of real use --------------------
     check(ov.has_exstyle(), "flags intact after show/hide/expand cycles")
@@ -419,8 +495,9 @@ def main() -> int:
     for ok, name, detail in rows:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if detail else ""))
     passed = sum(ok for ok, _, _ in rows)
-    if follow_skip:
-        print(f"  [skip] {follow_skip}")
+    for skip in (follow_skip, fs_skip):
+        if skip:
+            print(f"  [skip] {skip}")
     print(f"  [{'ok' if control else 'FAIL'}] CONTROL: an activating window was "
           f"seen stealing focus")
 

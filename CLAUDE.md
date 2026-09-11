@@ -144,6 +144,8 @@ monitor rather than the focused window's. Keep hands off the mouse while the
 suite runs: a failing `screen N: the cursor could be moved there` row means
 something else moved the pointer, not a placement bug. Only a screen WITHOUT
 the focused window can tell the two rules apart, so one monitor prints SKIP.
+It then puts a black fullscreen window, without focus, on that screen for ~2s,
+to check the idle pill hides there and only there.
 
 ## Gotcha: run the gates from a real terminal, not a detached launcher
 
@@ -447,3 +449,27 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   off and requires the pill to stay buried. **The cause is still unknown**, and
   `shout.log` now names the window on top each time it happens, so read that
   before theorising.
+
+- [2026-09-10] **The fullscreen hide never worked on the second monitor.** It
+  was `SHQueryUserNotificationState` alone, and a staged fullscreen window on
+  the left monitor got ACCEPTS_NOTIFICATIONS (5) back, whether it was a Qt
+  `showFullScreen()` or Chrome's `--start-fullscreen`, and even while it had
+  focus. Nothing had caught it: the policy rows set `_fullscreen = True`
+  directly, and the one real test was a game. Whether it answers BUSY on the
+  PRIMARY monitor is untested. It now decides only the global states (D3D
+  exclusive, presentation mode). `fullscreen_monitors()` says WHERE: per
+  monitor, the first window in z-order that isn't tool, click-through,
+  no-activate, cloaked, minimized or the wallpaper (Progman/WorkerW) must
+  cover the whole `rcMonitor` with no WS_CAPTION. Measured: fullscreen Chrome
+  is exactly the monitor rect with neither WS_CAPTION nor WS_THICKFRAME.
+  Maximized Chrome and VS Code keep both, and overhang the monitor by 8px on
+  three sides but stop at the taskbar. That is why the caption test exists: on
+  a taskbar-less monitor the overhang covers everything. Two ordering rules
+  keep the pill from flashing on a fullscreen screen: the mouse's monitor is
+  compared against the cached set **every frame** (a 0.5s poll showed it there
+  for up to half a second), and `_reposition()` runs **before** `show()`.
+  Controls: the old global check fails exactly the two hide rows, and a
+  mouse-monitor lookup cached for 0.5s fails only "never shown there on the
+  way". -> Before trusting an OS state query for a behaviour, stage the exact
+  case and read the query's own answer. A row that sets the flag by hand can
+  never notice a query that doesn't fire.

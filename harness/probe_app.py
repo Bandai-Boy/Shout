@@ -48,7 +48,8 @@ from shout import inject as inj  # noqa: E402
 from shout.__main__ import Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
 from shout.gestures import Event  # noqa: E402
-from shout.overlay import COLLAPSED_W, fullscreen_app_running, user32  # noqa: E402
+from shout.overlay import (COLLAPSED_W, cursor_monitor, fullscreen_state,  # noqa: E402
+                           user32)
 from shout.window import application  # noqa: E402
 
 inj.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
@@ -147,13 +148,14 @@ def main() -> int:
 
     def drive() -> None:
         try:
-            # The pill hides itself under a fullscreen app, which would fail
-            # every visibility row below for a reason that has nothing to do
-            # with the code. Say so rather than reporting a mystery.
+            # The pill hides itself on a screen showing a fullscreen app, which
+            # would fail every visibility row below for a reason that has
+            # nothing to do with the code. Say so rather than reporting a mystery.
             stage("driver: preconditions")
-            check(not fullscreen_app_running(),
-                  "precondition: no fullscreen app is running",
-                  "the pill hides itself under one, by design")
+            everywhere, fullscreen_on = fullscreen_state()
+            check(not everywhere and cursor_monitor() not in fullscreen_on,
+                  "precondition: nothing is fullscreen on the mouse's screen",
+                  "the pill hides itself there, by design")
 
             stage("driver: waiting for overlay hwnd")
             for _ in range(100):

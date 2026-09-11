@@ -64,14 +64,41 @@ DWMWA_CLOAKED = 14
 
 # SHQueryUserNotificationState — the documented "should I put something on
 # screen right now" query. It covers exclusive-fullscreen D3D, which comparing
-# window rectangles does not.
+# window rectangles does not, but it names no monitor, and measured 10 Sep 2026
+# it answered ACCEPTS_NOTIFICATIONS for a fullscreen Chrome window on the second
+# monitor even while that window had focus. So it only decides the states that
+# are global by nature; where a fullscreen window is comes from
+# fullscreen_monitors().
 QUNS_BUSY = 2
 QUNS_RUNNING_D3D_FULL_SCREEN = 3
 QUNS_PRESENTATION_MODE = 4
-FULLSCREEN_STATES = (QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE)
+EVERYWHERE_STATES = (QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE)
+GWL_STYLE = -16
+WS_CAPTION = 0x00C00000
+MONITOR_DEFAULTTONULL = 0
+MONITOR_DEFAULTTONEAREST = 2
+SM_CMONITORS = 80
+DESKTOP_CLASSES = ("Progman", "WorkerW")    # the wallpaper, which spans every monitor
 
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = ctypes.c_void_p
+user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+user32.MonitorFromWindow.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
 shell32.SHQueryUserNotificationState.argtypes = [ctypes.POINTER(ctypes.c_int)]
 
 _get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
@@ -114,14 +141,18 @@ def _cloaked(h) -> bool:
     return bool(c.value)
 
 
+def _class(h) -> str:
+    cls = ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(h, cls, 128)
+    return cls.value
+
+
 def _describe(h: int) -> str:
     """Class and pid, deliberately not the title: titles carry document names,
     and shout.log is the file people paste into bug reports."""
-    cls = ctypes.create_unicode_buffer(128)
-    user32.GetClassNameW(wintypes.HWND(h), cls, 128)
     pid = wintypes.DWORD(0)
     user32.GetWindowThreadProcessId(wintypes.HWND(h), ctypes.byref(pid))
-    return f"{cls.value!r} (pid {pid.value})"
+    return f"{_class(wintypes.HWND(h))!r} (pid {pid.value})"
 
 # -- geometry ----------------------------------------------------------------
 
@@ -241,11 +272,85 @@ def expanded_width(state: str, label_w: float) -> float:
     return min(MAX_PILL_W, max(MIN_EXPANDED_W, w))
 
 
-def fullscreen_app_running() -> bool:
+def notification_state() -> int:
+    """SHQueryUserNotificationState's answer, or 0 if it could not give one."""
     state = ctypes.c_int(0)
     if shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
-        return False
-    return state.value in FULLSCREEN_STATES
+        return 0
+    return state.value
+
+
+def cursor_monitor() -> int:
+    pt = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):     # fails on the secure desktop
+        return 0
+    return user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) or 0
+
+
+def _monitor_rect(m) -> tuple[int, int, int, int]:
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(mi)
+    user32.GetMonitorInfoW(m, ctypes.byref(mi))
+    r = mi.rcMonitor
+    return r.left, r.top, r.right, r.bottom
+
+
+def fullscreen_monitors() -> set[int]:
+    """The monitors whose top window is fullscreen content: it covers the whole
+    monitor, taskbar included, and has no title bar. Top means first in z-order
+    among windows a person could be looking at, so tool, click-through and
+    no-activate windows are passed over (the taskbar, this pill, Chrome's "Press
+    F11" hint), and so is the wallpaper.
+
+    It ignores focus on purpose: a video left fullscreen on one monitor while
+    you work on the other still hides the pill when the mouse goes back over
+    it. The title-bar test keeps out a maximized window on a monitor with no
+    taskbar, whose rect overhangs the monitor by its frame. Measured 10 Sep
+    2026: a fullscreen Chrome window is exactly the monitor rect, with neither
+    WS_CAPTION nor WS_THICKFRAME, while maximized Chrome and VS Code keep both
+    and stop at the taskbar."""
+    decided: dict[int, bool] = {}
+    wanted = user32.GetSystemMetrics(SM_CMONITORS)
+
+    def visit(h, _lparam):
+        if len(decided) >= wanted:
+            return False
+        if not user32.IsWindowVisible(h) or user32.IsIconic(h):
+            return True
+        if _get_long(h, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT
+                                        | WS_EX_NOACTIVATE):
+            return True
+        m = user32.MonitorFromWindow(h, MONITOR_DEFAULTTONULL)
+        if not m or m in decided or _cloaked(h) or _class(h) in DESKTOP_CLASSES:
+            return True
+        r = wintypes.RECT()
+        user32.GetWindowRect(h, ctypes.byref(r))
+        if r.right <= r.left or r.bottom <= r.top:
+            return True
+        left, top, right, bottom = _monitor_rect(m)
+        decided[m] = (r.left <= left and r.top <= top and r.right >= right
+                      and r.bottom >= bottom
+                      and (_get_long(h, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
+        return True
+
+    user32.EnumWindows(_WNDENUMPROC(visit), 0)
+    return {m for m, full in decided.items() if full}
+
+
+def fullscreen_state() -> tuple[bool, set[int]]:
+    """(fullscreen everywhere, the monitors something is fullscreen on). The
+    pill hides while idle when the first is true or the mouse's monitor is in
+    the second."""
+    state = notification_state()
+    on = fullscreen_monitors()
+    if state == QUNS_BUSY and not on:
+        # The shell sees something fullscreen that the rect test does not
+        # recognise; the focused window is the best guess at where.
+        fg = user32.GetForegroundWindow()
+        m = user32.MonitorFromWindow(fg, MONITOR_DEFAULTTONULL) if fg else None
+        if m:
+            on.add(m)
+    return state in EVERYWHERE_STATES, on
 
 
 class PillWidget(QtWidgets.QWidget):
@@ -431,7 +536,9 @@ class Overlay:
         self._shown = False
         self._dirty = True
         self._last_fullscreen_check = 0.0
-        self._fullscreen = False
+        self._fullscreen = False            # on the monitor the mouse is on
+        self._fullscreen_on: set[int] = set()
+        self._fullscreen_everywhere = False
         self._buried = False
         self._stopped = False
 
@@ -554,8 +661,9 @@ class Overlay:
     # -- the GUI-thread loop -------------------------------------------------
 
     def _visible_for(self, state: str) -> bool:
-        """Persistent, with one exception: a fullscreen app or a game gets the
-        screen to itself while Shout is merely idle. It never hides while
+        """Persistent, with one exception: a fullscreen app or a game gets its
+        screen to itself while Shout is merely idle, so the pill hides while
+        the mouse is on that screen and shows on any other. It never hides while
         dictating — that is precisely when the confirmation matters, and a
         surprise-free overlay is worth less than a truthful one."""
         if state in ("recording", "latched", "working"):
@@ -574,12 +682,16 @@ class Overlay:
         now = time.perf_counter()
         if now - self._last_fullscreen_check > 0.5:
             self._last_fullscreen_check = now
-            was = self._fullscreen
-            self._fullscreen = fullscreen_app_running()
-            if was != self._fullscreen:
-                self._dirty = True
+            self._fullscreen_everywhere, self._fullscreen_on = fullscreen_state()
             if self._shown:
                 self._keep_on_top()
+        # Every frame rather than every poll: the mouse crossing onto a
+        # fullscreen monitor must hide the pill before it is drawn there.
+        fullscreen = (self._fullscreen_everywhere
+                      or cursor_monitor() in self._fullscreen_on)
+        if fullscreen != self._fullscreen:
+            self._fullscreen = fullscreen
+            self._dirty = True
 
         state = self._state
         if state != self.state:
@@ -587,6 +699,13 @@ class Overlay:
             self._dirty = True
 
         want_visible = self._visible_for(state)
+        if want_visible:
+            # Placed before it is shown, never after, so it cannot appear for a
+            # frame on the screen it is leaving.
+            before = self._placed
+            self._reposition()
+            if self._placed != before:
+                self._dirty = True
         if want_visible and not self._shown:
             self.widget.show()
             self._enforce_exstyle()
@@ -596,11 +715,6 @@ class Overlay:
         elif not want_visible and self._shown:
             self.widget.hide()
             self._shown = False
-        if self._shown:
-            before = self._placed
-            self._reposition()
-            if self._placed != before:
-                self._dirty = True
 
         # -- expansion ------------------------------------------------------
         target = 1.0 if state in EXPANDED_STATES else 0.0

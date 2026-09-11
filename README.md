@@ -88,7 +88,7 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 - **Windows and NVIDIA only, tested on one machine** (Windows 11, RTX 5070). faster-whisper can run on a CPU (`"device": "cpu"` with `"compute_type": "int8"`), and CTranslate2 supports int8 on GTX 10-series cards. Neither is tested here, and CPU will be much slower.
 - **Admin windows**, meaning anything running elevated such as Task Manager or an admin terminal, can't receive a paste from a normal app. Shout leaves the text on your clipboard and tells you.
 - **The clipboard restore is text-only.** If you had an image or files copied, your transcript replaces them.
-- **The pill hides while a fullscreen game or app is running**, except while you're dictating.
+- **The pill hides on a screen showing a fullscreen game or video**, except while you're dictating. Move the mouse to another screen and it shows there.
 
 ## Meeting transcription
 
@@ -127,7 +127,7 @@ git config core.hooksPath hooks             # turn on the commit guard (the repo
 
 **Run them from an ordinary terminal.** Several gates need the foreground rights Windows gives a program started from the active window.
 
-**Expect them to take over briefly.** A test window opens and gets typed into, focus moves for a moment, the mouse pointer visits each screen and is put back, test tones play, and your default speakers and microphone are switched for about 3 seconds and then put back.
+**Expect them to take over briefly.** A test window opens and gets typed into, focus moves for a moment, the mouse pointer visits each screen and is put back, one screen goes black for a couple of seconds, test tones play, and your default speakers and microphone are switched for about 3 seconds and then put back.
 
 The commit guard refuses to commit recordings, transcripts, or any file over 1 MB.
 
