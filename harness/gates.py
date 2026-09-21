@@ -26,6 +26,7 @@ GATE_TIMEOUT_S = int(os.environ.get("SHOUT_GATE_TIMEOUT_S", "180"))
 GATES = [
     ("gestures", ROOT / "tests" / "test_gestures.py"),
     ("smoke", ROOT / "harness" / "smoke.py"),
+    ("tail", ROOT / "harness" / "probe_tail.py"),
     ("hook", ROOT / "harness" / "probe_hook.py"),
     ("inject", ROOT / "harness" / "probe_inject.py"),
     ("stuck", ROOT / "harness" / "probe_stuck.py"),
