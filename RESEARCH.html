@@ -1102,6 +1102,195 @@ uv pip install --python .venv/Scripts/python.exe <b>\</b>
       </div>
     </section>
 
+    <section id="speech-out">
+      <h2>Speech out</h2>
+      <p class="sub">Kyutai Pocket TTS &middot; measured 20 September 2026 &middot; CPU only</p>
+
+      <p>
+        The question was whether Shout could read an agent&rsquo;s answer aloud without breaking
+        the local-only premise or competing with Whisper for the GPU. It can, on both counts, and
+        the margin is wider than expected: <strong>Pocket TTS runs entirely on CPU</strong>, so
+        the 5070 stays exclusively Whisper&rsquo;s.
+      </p>
+
+      <div class="note">
+        <p class="hd">The design decision that makes this cheap</p>
+        <p>
+          Do not summarize the response. A finished turn&rsquo;s closing prose measured
+          <strong>3,415 characters</strong> in a sampled transcript &mdash; too long to hear, and
+          feeding it to a second model to shorten costs latency and hands the editorial judgement
+          to the weaker reader. Instead the model authors its own spoken line as a
+          <code>&lt;speak&gt;</code> block. Zero extra latency, zero extra VRAM, and the entity
+          that knows which sentence was load-bearing is the one that picks it.
+        </p>
+      </div>
+
+      <h3>Measured on this box</h3>
+      <p>
+        Six spoken headlines of the shape Shout would actually emit, one voice
+        (<code>alba</code>), 24kHz output. Controls: every clip asserted non-silent and of
+        plausible duration for its text, because a bench that measures nothing reports success
+        just as loudly as one that works. 6 of 6 clean.
+      </p>
+
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr>
+              <th>Case</th>
+              <th>Chars</th>
+              <th>Generate</th>
+              <th>Audio</th>
+              <th>Real-time factor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="name">short verdict</td><td class="num">62</td><td class="num win">0.71s</td><td class="num">3.60s</td><td class="num win">0.20</td></tr>
+            <tr><td class="name">failure report</td><td class="num">93</td><td class="num">0.97s</td><td class="num">5.12s</td><td class="num">0.19</td></tr>
+            <tr><td class="name">research result</td><td class="num">95</td><td class="num">0.98s</td><td class="num">5.12s</td><td class="num">0.19</td></tr>
+            <tr><td class="name">push notice</td><td class="num">63</td><td class="num">0.76s</td><td class="num">3.92s</td><td class="num">0.19</td></tr>
+            <tr><td class="name">warning</td><td class="num">86</td><td class="num">0.74s</td><td class="num">3.84s</td><td class="num">0.19</td></tr>
+            <tr><td class="name">long paragraph</td><td class="num">196</td><td class="num">2.07s</td><td class="num">10.48s</td><td class="num">0.20</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        One-time startup cost is <strong>5.72s</strong> &mdash; 4.78s to load the model, 0.95s for
+        a voice state. Both are paid once in a long-lived process, exactly like the CUDA warmup,
+        and being CPU work they can overlap it. The number that matters in use is the
+        <strong>0.7&ndash;1.0s</strong> to generate a one or two sentence line, which follows a
+        turn that already cost tens of seconds of agent work. A real-time factor of 0.19 means
+        synthesis outruns speech roughly five to one, so the streaming path
+        (<code>generate_audio_stream</code>, confirmed present) is headroom rather than a
+        requirement.
+      </p>
+
+      <h3>Claims audit</h3>
+      <p class="sub">What the literature says, checked against the repositories and this machine</p>
+
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th>Claim</th><th>Verdict</th><th>What is actually true</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Local TTS needs the GPU</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>0.19 real-time factor on CPU alone, 100M parameters, two cores. The GPU is never touched.</td>
+            </tr>
+            <tr>
+              <td>Piper is the safe, MIT-licensed default</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>
+                <code>rhasspy/piper</code> is <strong>archived</strong> (last push 26 August 2025).
+                Active development moved to <code>OHF-Voice/piper1-gpl</code>, which is
+                <strong>GPL-3.0</strong>. For a public repo that dictates architecture: linked as a
+                library it is viral, invoked as a separate binary its reach is far weaker.
+              </td>
+            </tr>
+            <tr>
+              <td>Time-to-first-audio is the criterion that decides the engine</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>
+                This framing was wrong and skewed an early shortlist. The turn already cost tens of
+                seconds; sub-second synthesis is invisible. Quality is what is experienced forty
+                times a day. Streaming earns its priority only in the spoken-reply loop.
+              </td>
+            </tr>
+            <tr>
+              <td>Kokoro is the fast lightweight option</td>
+              <td><span class="tag t-un">Unverified</span></td>
+              <td>
+                The only CPU benchmark found reports 1.28&times; real-time and 3.66s to first
+                audio &mdash; but it is published by a vendor selling a competing engine, and no
+                GPU figure exists anywhere. Not measured here. Treat the reputation and the
+                evidence as separate things.
+              </td>
+            </tr>
+            <tr>
+              <td>The finished response must be parsed out of the transcript JSONL</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>
+                <code>last_assistant_message</code> is supplied on the <code>Stop</code> hook
+                payload. The docs warn the transcript file is not guaranteed to contain the final
+                message at Stop time, so parsing it is intermittently wrong for reasons that are
+                miserable to diagnose.
+              </td>
+            </tr>
+            <tr>
+              <td>A Stop-hook conversation is hard-capped at 8 rounds</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>
+                8 is the default, not the ceiling.
+                <code>CLAUDE_CODE_STOP_HOOK_BLOCK_CAP</code> raises it and <code>0</code> disables
+                it outright, with the docs explicitly sanctioning the case. A design that disables
+                it owns its own round counter instead.
+              </td>
+            </tr>
+            <tr>
+              <td>Fish Speech is a contender on quality</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>
+                Disqualified on licence, not merit: the Fish Audio Research License forbids
+                commercial use. GitHub reports <code>NOASSERTION</code>, which is the tell to read
+                the actual LICENSE file rather than the summary.
+              </td>
+            </tr>
+            <tr>
+              <td>Coqui XTTS-v2 is still a live option</td>
+              <td><span class="tag t-no">Refuted</span></td>
+              <td>Last commit August 2024. Still recommended uncritically by 2026 aggregator blogs.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Voice licensing</h3>
+      <p>
+        The model weights are CC BY 4.0, but <strong>each voice carries its own licence from its
+        source corpus</strong>. Two of the shipped default voices cannot be used in a public
+        repo. 21 voices were rendered and all 21 produced clean audio, though
+        <code>javert</code> tripped a <code>Maximum generation length reached without EOS</code>
+        warning and ran 13.0s against roughly 8s for every other voice on identical text.
+      </p>
+
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th>Corpus</th><th>Licence</th><th>Voices</th><th>Shippable</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="name">vctk/</td>
+              <td>CC BY 4.0</td>
+              <td>charles, george, paul, michael, anna, eve, vera, jane, mary, azelma, eponine, fantine</td>
+              <td class="win">Yes</td>
+            </tr>
+            <tr><td class="name">voice-zero/</td><td>CC0</td><td>bill_boerst, stuart_bell, caro_davy, peter_yearsley</td><td class="win">Yes</td></tr>
+            <tr><td class="name">voice-donations/</td><td>CC0</td><td>javert, marius</td><td class="win">Yes</td></tr>
+            <tr><td class="name">alba-mackenna/</td><td>CC BY 4.0</td><td>alba</td><td class="win">Yes</td></tr>
+            <tr><td class="name">expresso/</td><td>CC BY-NC 4.0</td><td>cosette</td><td>No &mdash; non-commercial only</td></tr>
+            <tr><td class="name">ears/</td><td>CC BY-NC 4.0</td><td>jean</td><td>No &mdash; non-commercial only</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <p class="hd">Design consequence for Shout</p>
+        <p>
+          Speech belongs inside the existing process, not beside it. Shout already owns a
+          device-following output stream, a tray, and an overlay state machine &mdash; a second
+          app would re-litigate all of it. One invariant removes the entire class of echo
+          problems: <strong>never speak while the microphone is open.</strong> Shout owns both
+          ends, so it can enforce that, and the chord then doubles as the interrupt signal, which
+          means acoustic echo cancellation is never needed. Output level must be normalised:
+          measured peaks across voices ranged 0.200 to 0.802, a four-fold spread.
+        </p>
+      </div>
+    </section>
+
     <section id="open">
       <h2>Still unverified</h2>
       <p class="sub">Known unknowns, recorded so they are not mistaken for facts</p>
@@ -1112,6 +1301,11 @@ uv pip install --python .venv/Scripts/python.exe <b>\</b>
         <li>Whether loudness normalization before ASR helps or hurts. Denoising is confirmed harmful; loudnorm has never been benchmarked.</li>
         <li>Whether any shipping Parakeet runtime exposes vocabulary biasing. Absence of evidence, not evidence of absence.</li>
         <li>The exact default value of <code>LowLevelHooksTimeout</code>. Microsoft documents the 1000ms ceiling but not the unset default.</li>
+        <li>Whether Pocket TTS&rsquo;s streaming path reaches its claimed ~200ms first chunk on this box. Only whole-utterance generation was measured; <code>generate_audio_stream</code> exists but was not timed.</li>
+        <li>Whether a <code>Stop</code> hook that waits several seconds blocks the user from typing during the wait. Not stated in the docs, and it decides how the spoken-reply loop feels.</li>
+        <li>Whether sherpa-onnx&rsquo;s statically linked onnxruntime can coexist in-process with the pinned 1.29.0 the VAD uses. Only relevant if Pocket TTS is ever replaced.</li>
+        <li>Whether Kokoro on this GPU beats Pocket TTS on quality at acceptable latency. Not benchmarked &mdash; Pocket TTS cleared every measurable bar first.</li>
+        <li>Why <code>javert</code> alone hits <code>Maximum generation length reached without EOS</code> on text every other voice handles. <code>--eos-threshold</code> is exposed but untuned.</li>
       </ul>
 
       <h3>Resolved since</h3>
