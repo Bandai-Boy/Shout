@@ -1108,12 +1108,31 @@ uv pip install --python .venv/Scripts/python.exe <b>\</b>
 
       <ul class="plain">
         <li>Every WER and latency figure for models <em>other</em> than the one benchmarked here. No published numbers exist for any RTX 50-series card.</li>
-        <li>Whether <code>large-v3-turbo</code> inherits large-v3&rsquo;s hallucination regression. Worth spot-checking on the real recording.</li>
         <li>Whether noScribe truly needs no Hugging Face token, or just hides the handshake on first run.</li>
         <li>Whether loudness normalization before ASR helps or hurts. Denoising is confirmed harmful; loudnorm has never been benchmarked.</li>
         <li>Whether any shipping Parakeet runtime exposes vocabulary biasing. Absence of evidence, not evidence of absence.</li>
         <li>The exact default value of <code>LowLevelHooksTimeout</code>. Microsoft documents the 1000ms ceiling but not the unset default.</li>
       </ul>
+
+      <h3>Resolved since</h3>
+      <p>
+        <span class="tag t-meas">Measured</span> <strong>20 September 2026 &mdash;
+        <code>large-v3-turbo</code> does inherit the hallucination behaviour.</strong>
+        Reported from daily use at roughly one dictation in six: an invented
+        subtitle outro after the last real word, most often &ldquo;We&rsquo;ll be
+        right back&rdquo;. The obvious cause is <strong>not</strong> the cause.
+        Across 62 cases &mdash; synthetic room tone at four levels, digital
+        silence, and real recorded noise floor taken from the quiet stretches of
+        the JFK clip, appended to speech at tails from 0.3s to 6s and gains to
+        12&times; &mdash; the hallucination count was <strong>zero</strong>,
+        because <code>vad_filter</code> strips a silent tail before the decoder
+        ever sees it. It takes a real sound that clears the VAD: a breath, a lip
+        smack, a chair creak. Shout drops the known phrases in
+        <code>transcribe.assemble()</code> and now logs per-segment
+        <code>no_speech_prob</code> and <code>avg_logprob</code> so a
+        confidence-based filter can be tuned on measured data instead of a
+        guess. See CLAUDE.md, &ldquo;Invented trailing phrases&rdquo;.
+      </p>
 
       <p>
         The <code>faster-whisper</code> wrapper itself was last pushed <strong>19 November

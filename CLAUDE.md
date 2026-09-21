@@ -93,6 +93,47 @@ needing 85).
 configured voice and asserts the cue stays inert in the transcript, which is a
 property of the sound, not of the code.
 
+## Invented trailing phrases
+
+Whisper was trained on a lot of subtitled video, so audio it cannot resolve into
+words decodes to the boilerplate those subtitle files end with. Reported from
+real use on 20 Sep 2026 at roughly one dictation in six: a trailing "We'll be
+right back" after the last real word.
+
+**Trailing silence is not the trigger.** Measured the same day across 62 cases —
+synthetic room tone at four levels, digital silence, and real recorded noise
+floor lifted from the quiet stretches of `jfk.wav`, appended to speech at tails
+from 0.3s to 6s and gains to 12x — the hallucination count was **zero**, because
+`vad_filter` removes the tail before the decoder sees it (every segment ended at
+~2.0s of a 3.2s+tail clip). So the usual fix, trimming silence before
+transcribing, would do nothing here. It takes a real *sound*: a breath, a lip
+smack or a chair creak clears the VAD, reaches the decoder carrying no lexical
+content, and comes back as an outro.
+
+`transcribe.assemble()` drops it. The inclusion rule for `_BOILERPLATE` is
+deliberate and load-bearing: **a phrase earns a place only if it names watching,
+listening, a channel or a video, or is a bracketed sound tag or an attribution
+line.** A missing real word is invisible corruption; a surviving junk phrase is
+visible and one keystroke to delete, and that asymmetry is what sets the bar.
+Generic calls to action are excluded however often Whisper invents them — "stay
+tuned", "please subscribe" and "see you next time" are real marketing copy Gabe
+dictates for the shop. So are "Thank you", "Bye" and "You", which are the most
+common Whisper hallucinations of all. The fused-match patterns are anchored to a
+trailing sentence boundary so they can never cut into a sentence.
+
+`transcribe()` also logs one per-segment line per dictation — `nsp`
+(`no_speech_prob`), `lp` (`avg_logprob`), `cr` and a character *count*. Numbers
+only, never words, so README's promise about `shout.log` holds even if the strip
+misfires; a dropped phrase is logged as a pattern **index**, not its text. Those
+numbers exist so a confidence-based filter can be tuned on measured data rather
+than guessed at. Note faster-whisper's own `no_speech_threshold` cannot do this
+job: it is applied per 30-second window, so real speech pulls the window average
+up over a junk tail.
+
+**Re-run `harness/probe_tail.py` after touching `_BOILERPLATE`.** It requires
+every pattern to be exercised by a case — exact, not a floor, because a floor
+let 8 of 13 patterns ship untested on its first run. It needs no GPU.
+
 ## Commit guard
 
 `hooks/pre-commit` refuses to commit recordings, transcript-shaped files, or any
@@ -473,3 +514,33 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   way". -> Before trusting an OS state query for a behaviour, stage the exact
   case and read the query's own answer. A row that sets the flag by hand can
   never notice a query that doesn't fire.
+
+- [2026-09-20] **Smart App Control blocked `.venv/Scripts/python.exe` itself**,
+  for a whole session, and it never cleared (three retries over ~20 minutes).
+  This is a larger blast radius than the 17 and 18 Sep notes: not a `.pyd` or a
+  DLL loaded *by* Python, but the interpreter, so nothing in `_load_model`'s
+  retry can help and every gate invocation in CLAUDE.md's Commands block is
+  dead. The running Shout was unaffected throughout — it had already started,
+  and it runs `shoutw.exe`, a *different* file. That is also the way out:
+  `shoutw.exe` is a copy of the real GUI-subsystem `pythonw.exe`, it sits in
+  `.venv/Scripts` so it still resolves the venv from `pyvenv.cfg`, and SAC
+  judged it separately. Cost: it is GUI-subsystem, so `print()` goes nowhere —
+  a script driven this way must open its own output file and point `sys.stdout`
+  at it, and PowerShell's `-RedirectStandardOutput` works for the ones that
+  don't. → When the venv interpreter is blocked, do not wait it out and do not
+  conclude the work is impossible; re-run through `shoutw.exe` and have the
+  script write its own file. Worth noting the asymmetry for a future session:
+  the app survives a block that makes the whole test suite unrunnable, so
+  "Shout is fine" is not evidence that the toolchain is.
+
+- [2026-09-20] Reproducing the trailing-hallucination with SYNTHETIC audio was
+  a dead end, and the dead end was the finding. 62 cases of gaussian room tone
+  and real recorded noise floor appended to speech produced zero hallucinations,
+  because `vad_filter` cut every tail off before the decoder saw it — the
+  segments all ended at ~2.0s of a clip up to 9s long. Two lessons. The obvious
+  fix for a reported bug can be aimed at a mechanism that provably isn't
+  running: "trim the trailing silence" would have shipped, changed nothing, and
+  looked like a fix until the next report. And a probe that cannot reproduce a
+  user's bug is not evidence the bug isn't real — it narrows the cause, which
+  here moved it from "silence" to "a real sound that clears the VAD", and that
+  is what decided the design. State the negative result as a result.

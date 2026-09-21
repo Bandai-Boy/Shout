@@ -80,7 +80,7 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 | **Recent dictations** | Your last 10 dictations are kept in memory, so you can copy one back if a paste missed. They are never written to disk and are forgotten when Shout quits. **Clear** on the Recent dictations page forgets them sooner. |
 | **Keystrokes** | One synthetic Ctrl+V per dictation, sent only after you've let go of Ctrl+Win. |
 | **Network** | None while running. Shout loads the model with `HF_HUB_OFFLINE=1` and `local_files_only=True`, and the installer's model download is the only network access. To check for yourself, `git grep -n -E "(import\|from) (requests\|urllib\|http\|socket\|httpx)" -- shout/` finds nothing. |
-| **Disk** | `%APPDATA%\Shout\config.json`, plus `shout.log`, which records timings, character counts and device names but never your words. |
+| **Disk** | `%APPDATA%\Shout\config.json`, plus `shout.log`, which records timings, character counts, device names and the model's own per-segment confidence numbers, but never your words. |
 | **Startup** | Only if you installed with `-Autostart`. |
 
 ## Known limitations
