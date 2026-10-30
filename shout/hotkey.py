@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 
 _CTRL = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.ctrl}
 _WIN = {keyboard.Key.cmd_l, keyboard.Key.cmd_r, keyboard.Key.cmd}
+_MODIFIERS = _CTRL | _WIN | {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
+                             keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
+                             keyboard.Key.alt_gr}
+VK_V = 0x56
 
 
 class HotkeyListener:
@@ -42,6 +46,9 @@ class HotkeyListener:
         # Callback durations, for the p99 criterion and the watchdog's health check.
         self.durations: collections.deque[float] = collections.deque(maxlen=4096)
         self.installs = 0
+        # Keys that could have moved the caret or changed the text: anything
+        # but a modifier, and not the V of a Ctrl+V (Shout's own paste is one).
+        self.keystrokes = 0
 
     # -- the hook callback: must return in microseconds ---------------------
 
@@ -83,6 +90,8 @@ class HotkeyListener:
         ctrl = bool(self._down & _CTRL)
         win = bool(self._down & _WIN)
         chord = ctrl and win
+        if pressed and key not in _MODIFIERS and not (ctrl and getattr(key, "vk", None) == VK_V):
+            self.keystrokes += 1
 
         if chord and not self._chord:
             self._chord = True

@@ -43,6 +43,12 @@ from .recent import Recent
 from .tray import Tray
 from .watchdog import Watchdog
 from .window import Window, application
+from .winapi import user32
+
+
+def foreground() -> int:
+    """The window a paste goes to. A function so probe_app can stand in for it."""
+    return user32.GetForegroundWindow() or 0
 
 log = logging.getLogger("shout")
 
@@ -102,6 +108,10 @@ class Shout:
         self.hotkey = HotkeyListener(self._on_gesture_event)
         self.watchdog = Watchdog(self.gestures, self.hotkey, self._dispatch)
         self.recent = Recent()
+        # Where the last paste landed, and the keystroke count right after it.
+        # A paste into the same window with no key pressed since continues it.
+        self._pasted_into = None
+        self._keystrokes_at_paste = 0
         self.window: Window | None = None
         self.overlay = Overlay(enabled=cfg.overlay,
                                level_source=lambda: self.recorder.level,
@@ -317,10 +327,18 @@ class Shout:
             # Before the paste, so a paste that fails or lands nowhere still
             # leaves the words somewhere to get them back from.
             self.recent.add(text)
-            outcome = inject(text, self.cfg)
+            # Back-to-back dictations would otherwise paste as "that?Ironically".
+            into = foreground()
+            joins = (into == self._pasted_into
+                     and self.hotkey.keystrokes == self._keystrokes_at_paste)
+            outcome = inject(" " + text if joins else text, self.cfg)
+            if outcome == "pasted":
+                self._pasted_into = into
+                self._keystrokes_at_paste = self.hotkey.keystrokes
             latency = time.perf_counter() - t_commit
-            log.info("END-TO-END %.0fms for %.1fs of audio -> %s",
-                     latency * 1000, len(audio) / SAMPLE_RATE, outcome)
+            log.info("END-TO-END %.0fms for %.1fs of audio -> %s%s",
+                     latency * 1000, len(audio) / SAMPLE_RATE, outcome,
+                     " (joined)" if joins else "")
             if outcome == "elevated_target":
                 self.tray.notify("That window is elevated — text is on your clipboard")
             elif outcome not in ("pasted", "empty"):

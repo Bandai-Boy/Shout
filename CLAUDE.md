@@ -72,6 +72,17 @@ notification center. `_finish` adds to the list BEFORE `inject()`, so a paste
 that raises or lands nowhere still leaves the words; `probe_app` asserts that
 order, and moving the add after `inject()` fails exactly three of its rows.
 
+Back-to-back dictations **join with a leading space**: `_finish` prefixes one when
+the paste goes to the same foreground window as the last one AND
+`HotkeyListener.keystrokes` has not moved since. That counter ignores modifiers
+and the V of a Ctrl+V (Shout's own paste), so Enter or any typing makes the next
+dictation stand alone. Shout cannot read the field's text, so a mouse click to
+somewhere else in the same window still joins. The recent list keeps the words
+without the space. `shout.log` marks a joined paste `(joined)`. `probe_app` covers all
+six cases, and each of three mutations (never join, no counter, V counted) fails
+only its own rows. Not yet seen in real use: whether Windows injects a key when
+the chord's Win lifts, which would stop every join (the log would show none).
+
 The lab drives `shout.cues.build()` directly and merges the
 cue keys into config.json rather than rewriting it. A running Shout polls that
 file every 500ms and follows the **cue keys only**, so a Save plays from the
@@ -252,6 +263,19 @@ reads the wording (inverted auxiliary, wh-word plus verb, a tag such as
 before a personal pronoun, so orders like "Do it now" stay statements. A
 sentence ending in "!", "?" or an ellipsis is never overruled. Gate:
 `harness/probe_questions.py`, mostly near misses.
+
+**Run-on, unpunctuated output** is a decoding MODE Whisper picks per window, not
+a function of pauses: the same text read flat came back as one sentence with a
+single final period, while other dictations in the same minute were perfectly
+punctuated. `PUNCTUATION_PROMPT` (an `initial_prompt` of short punctuated
+sentences) tips it back. Measured 29 Oct 2026 on 24 SAPI clips of real dictations
+read flat: run-on 24/24 with no prompt, 12/24 with the shipped prompt, sentence
+ends 21 -> 55; "Hello. Welcome to my lecture." only reached 22/24. Zero leakage
+on silence, room tone and a breath; words unchanged bar a hyphen. Two of the six
+texts never flipped under any prompt, so the prompt is a ceiling of about half,
+and the rest would need a punctuation model. `without_timestamps` made no
+difference. It conditions only the first 30s window (`condition_on_previous_text=False`
+resets the prompt), and `warmup()` exercises it since it calls `transcribe()`.
 
 **Re-run `harness/probe_tail.py` after touching `_BOILERPLATE` or the tail rule.** It requires
 every pattern to be exercised by a case — exact, not a floor, because a floor

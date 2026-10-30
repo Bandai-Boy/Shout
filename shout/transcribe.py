@@ -103,6 +103,12 @@ _TRIM = re.compile(r"^[^\w\[\(]+|[^\w\]\)]+$")
 TAIL_MAX_CHARS = 25
 TAIL_MAX_LOGPROB = -0.45
 
+# Short, choppy, conversational, and dense with ". , ?" -- measured best of four
+# (29 Oct 2026). Pure punctuation style: no product names, so it biases no words.
+PUNCTUATION_PROMPT = ("Yeah, so. Wait, no. Hmm. Okay, that works. Did it save? "
+                      "It did. Good. Next, the scanner. It's slow, right? "
+                      "Let's fix it.")
+
 
 def _invented_tail(segs) -> bool:
     """The last segment is alone in a later decode window, short, and unsure."""
@@ -214,6 +220,10 @@ class Transcriber:
             vad_filter=True,
             # One bad window otherwise poisons every window after it.
             condition_on_previous_text=False,
+            # Whisper sometimes decodes in an unpunctuated run-on mode; a
+            # prompt of short punctuated sentences tips it back. Applies to
+            # the first 30s window only (the reset above). See CLAUDE.md.
+            initial_prompt=PUNCTUATION_PROMPT,
         )
         segs = list(segments)
         text, dropped, tail = assemble(segs)

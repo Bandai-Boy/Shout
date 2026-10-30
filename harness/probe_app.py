@@ -352,6 +352,53 @@ def main() -> int:
                   "and the notice gives a count, never the words",
                   f"{said!r}")
 
+            # --- back-to-back dictations join with a space -------------------
+            # The keys go through the hook's own _process, the way the worker
+            # delivers them, so the rows cover what counts as a keystroke.
+            stage("driver: joining dictations")
+            from pynput.keyboard import Key, KeyCode
+            window = [111]
+            real_foreground = shout_main.foreground
+            shout_main.foreground = lambda: window[0]
+
+            def dictate(words: str) -> str:
+                app.transcriber = SimpleNamespace(transcribe=lambda audio: words)
+                app._queue_commit([0.0] * 16000)
+                app.commits.submit(lambda: None).result(timeout=5)
+                return pasted[-1][0]
+
+            def keys(*seq) -> None:
+                for k in seq:
+                    app.hotkey._process(True, k, time.perf_counter())
+                for k in reversed(seq):
+                    app.hotkey._process(False, k, time.perf_counter())
+
+            try:
+                got = [dictate("Alpha."), dictate("Beta?")]
+                keys(Key.ctrl_l, KeyCode.from_vk(0x56))
+                got.append(dictate("Gamma."))
+                keys(Key.shift)
+                got.append(dictate("Delta."))
+                keys(Key.enter)
+                got.append(dictate("Epsilon."))
+                window[0] = 222
+                got.append(dictate("Zeta."))
+            finally:
+                shout_main.foreground = real_foreground
+            want = ["Alpha.", " Beta?", " Gamma.", " Delta.", "Epsilon.", "Zeta."]
+            names = ["a paste into a window another paste did not just go to stands alone",
+                     "the next dictation into the same window starts with a space",
+                     "a Ctrl+V since (Shout's own paste is one) still joins",
+                     "a lone modifier since still joins",
+                     "a key pressed since (Enter, typing) stands alone",
+                     "a paste into another window stands alone"]
+            for name, g, w in zip(names, got, want):
+                check(g == w, name, f"pasted {g!r}, want {w!r}")
+            check(app.recent.last().text == "Zeta." and
+                  [e.text for e in app.recent.newest_first()][4] == "Beta?",
+                  "the recent list keeps the words without the space",
+                  f"{[e.text for e in app.recent.newest_first()][:5]}")
+
             # --- shutdown ----------------------------------------------------
             # Deliberately from a worker thread, not the GUI thread: stop() must
             # be safe to call from anywhere, and the teardown that touches Qt
