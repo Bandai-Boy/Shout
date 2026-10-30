@@ -57,6 +57,19 @@ config.json — so there is nothing to restart. Then re-run
 transcript, and it is a property of the SOUND — every material here is harmonic
 because the VAD rejects tones, and a noisy one could break it.
 
+## Orb
+
+The orb's look, by eye: how many waves go round, how rough the water is, how
+fast it turns, how far your voice raises it, the size, the colour, the comet,
+the resting capsule.
+The preview is the overlay's own renderer and motion, drawn magnified and at
+its real size, in whichever state you pick, with a stand-in voice whose level
+you set. Save writes only the knobs that differ from the shipped look, as
+`orb_tune`, and the running orb follows within half a second. Holding Ctrl+Win
+then shows it with your real voice. Save never changes which look is on screen;
+the page's own Pill | Orb switch does, writing the same `overlay_style` key as
+the tray menu and following that menu while the page is open.
+
 ---
 
 ## The look
@@ -89,16 +102,19 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .config import Config, config_dir
+from . import orb
+from .config import Config, config_dir, merge
 from .cues import MAX_GESTURE_S, PRESETS, Cues, Voice, build, duration_s, notes
 from .inject import set_clipboard_text
+from .overlay import EXPAND_RATE, _ease
 from .recent import SIZE, Entry, Recent
 
 # Ember Dusk, from vendor-vault-themes.md. TEXT_MUTED and the raw VV negative are
@@ -133,6 +149,60 @@ KNOBS = [
     ("gain", "Trim", 0.2, 1.0, 2),
 ]
 STEPS = 1000
+
+# The orb page's knobs, as two columns of sections: (field, label, decimals,
+# suffix, what it does). Their ends are shout.orb.RANGES, which also clamps
+# whatever config.json holds. A "%" suffix shows a fraction as a percent.
+SPIN_TIP = "Turns per minute. Negative turns the other way."
+TURB_TIP = ("How rough the water is. 0 is one even swell going round; higher "
+            "makes the crests uneven and puts ripples on them. It never makes "
+            "them pointy — your voice adds some of its own.")
+# Hands-free is a different water from holding, not just a different count, so
+# its Turbulence knob does a different thing with the same 0-1 range.
+LATCH_TURB_TIP = ("How rough the water is. 0 is one even swell going round; "
+                  "higher rides smaller, faster ripples on top of it, which is "
+                  "what makes hands-free look unlike holding. Your voice adds "
+                  "some of its own.")
+ORB_KNOBS = [
+    [("Holding", [
+        ("hold_crests", "Waves", 0, "", "How many wave crests go round while you "
+                                        "hold the keys."),
+        ("hold_turb", "Turbulence", 2, "", TURB_TIP),
+        ("hold_spin", "Spin", 1, "", SPIN_TIP),
+    ]), ("Hands-free", [
+        ("latch_crests", "Waves", 0, "", "How many wave crests go round while "
+                                         "hands-free."),
+        ("latch_turb", "Turbulence", 2, "", LATCH_TURB_TIP),
+        ("latch_spin", "Spin", 1, "", SPIN_TIP),
+    ]), ("Voice", [
+        ("height", "Wave height", 1, "px", "How far a crest stands out while you "
+                                           "are silent."),
+        ("push", "Voice push", 1, "px", "How much further your voice raises the "
+                                        "crests, at full volume. It roughens "
+                                        "them as well."),
+        ("swell", "Swell", 0, "%", "How much the whole orb grows at full volume."),
+        ("glow", "Glow", 0, "%", "How much brighter it gets at full volume."),
+    ])],
+    [("Look", [
+        ("size", "Size", 0, "px", "The orb, glow edge to glow edge."),
+        ("wobble", "Wobble", 2, "", "How far the edge wanders on its own. 0 keeps "
+                                    "the ring round."),
+        ("hue", "Hue", 0, "°", "Turns every colour round the colour wheel."),
+        ("brightness", "Brightness", 2, "", "How bright the ring is."),
+    ]), ("Transcribing", [
+        ("comet_rpm", "Comet", 0, "", "How fast the comet goes round, in turns per "
+                                      "minute."),
+        ("comet_tail", "Tail", 0, "°", "How far round the ring the comet's tail "
+                                       "reaches."),
+    ]), ("At rest", [
+        ("rest_w", "Width", 0, "px", "The resting capsule, rim to rim."),
+        ("rest_h", "Height", 0, "px", "The resting capsule, rim to rim."),
+        ("rim_rpm", "Rim spin", 1, "", "How fast the rim's colour circles, in turns "
+                                       "per minute."),
+    ])],
+]
+PREVIEW_STATES = (("idle", "At rest"), ("recording", "Holding"),
+                  ("latched", "Hands-free"), ("working", "Transcribing"))
 
 QSS = f"""
 #card {{
@@ -856,12 +926,7 @@ class Lab(QtWidgets.QWidget):
         """Merge into config.json rather than rewriting it — the file may hold
         settings this window knows nothing about, and Config.save() would write
         this process's defaults over every one of them."""
-        path = config_dir() / "config.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        raw = self._read()
-        raw.update(keys)
-        path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-        return path
+        return merge(keys)
 
     def _voice_dict(self) -> dict:
         """The whole voice, not a diff against a material. `partials` is in here
@@ -921,6 +986,451 @@ class Lab(QtWidgets.QWidget):
         self._sync_widgets()
         self._apply(play="start")
         self.status.setText(f"Deleted {name!r}. Now on 'blip'.")
+
+
+def speech_level(t: float) -> float:
+    """A stand-in for talking, as a 0-1 envelope: syllables about four a
+    second, louder and quieter phrases, and a breath every few seconds. The
+    rough shape a level meter shows for speech, not a model of it."""
+    syllable = max(0.0, math.sin(t * math.tau * 4.1)) ** 0.7
+    phrase = 0.65 + 0.35 * math.sin(t * math.tau * 0.43)
+    return 0.0 if t % 3.2 > 2.6 else syllable * phrase
+
+
+class OrbPreview(QtWidgets.QWidget):
+    """The orb as the overlay draws it, twice: magnified, to see what a knob
+    does, and at the size it really is on screen. Both are the overlay's own
+    Renderer and Choreography, rendered the overlay's way, so what you tune here
+    is what the app draws and not a lookalike of it. Animates only while
+    visible."""
+
+    ZOOM = 2.0
+    GAP = 12.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(340, 212)
+        self.state = "recording"
+        self.level = 0.3
+        self.talking = True
+        self.motion = orb.Choreography()
+        self.expand = 0.0
+        self.frames: tuple[QtGui.QImage | None, QtGui.QImage] | None = None
+        self.drawn = 0
+        try:
+            self.renderer: orb.Renderer | None = orb.Renderer()
+        except Exception:
+            self.renderer = None
+        self._t0 = self._last = time.perf_counter()
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def zoom(self) -> float:
+        """The magnified view's scale: up to ZOOM, as far as the tile allows
+        beside the actual-size view. 0 when that is too little to be worth
+        showing, which a very big tune can make it."""
+        win = self.motion.tune.win
+        room = min(self.height() - 4.0, self.width() - 3 * self.GAP - win)
+        z = min(self.ZOOM, room / win)
+        return z if z >= 1.25 else 0.0
+
+    def _tick(self) -> None:
+        now = time.perf_counter()
+        dt = min(now - self._last, 0.1)
+        self._last = now
+        # Per frame, like the overlay's own inflation.
+        target = 0.0 if self.state == "idle" else 1.0
+        self.expand += (target - self.expand) * EXPAND_RATE
+        if abs(self.expand - target) <= 0.001:
+            self.expand = target
+        talk = speech_level(now - self._t0) if self.talking else 1.0
+        self.motion.step(dt, self.state, self.level * talk)
+        self.render_frames()
+        self.update()
+
+    def render_frames(self) -> None:
+        if self.renderer is None:
+            return
+        dpr = self.devicePixelRatioF()
+        win = self.motion.tune.win
+        morph = _ease(self.expand)
+        views = []
+        try:
+            for zoom in (self.zoom(), 1.0):
+                if not zoom:
+                    views.append(None)
+                    continue
+                image = self.renderer.render(self.motion.uniforms(morph, dpr * zoom),
+                                             round(win * dpr * zoom * orb.SUPERSAMPLE))
+                image.setDevicePixelRatio(dpr * orb.SUPERSAMPLE)
+                views.append(image)
+        except Exception:
+            self.close_renderer()
+            return
+        self.frames = (views[0], views[1])
+        self.drawn += 1
+
+    def paintEvent(self, _e: QtGui.QPaintEvent) -> None:
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        r = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 120, 38), 1.0))
+        p.setBrush(QtGui.QColor(12, 6, 22, 150))
+        p.drawRoundedRect(r, 10, 10)
+        p.setFont(tracked(7, 1.2, bold=True))
+        p.setPen(QtGui.QColor(C["label"]))
+        if self.renderer is None:
+            p.drawText(r.adjusted(16, 0, -16, 0),
+                       int(QtCore.Qt.AlignmentFlag.AlignCenter
+                           | QtCore.Qt.TextFlag.TextWordWrap),
+                       "The orb needs OpenGL, which is not available here.")
+            p.end()
+            return
+        if self.frames is None:
+            p.end()
+            return
+        big, actual = self.frames
+        win = self.motion.tune.win
+        x = self.GAP
+        if big is not None:
+            side = win * self.zoom()
+            p.drawImage(QtCore.QPointF(x, (self.height() - side) / 2.0), big)
+            p.drawText(QtCore.QPointF(x + 4, 18), f"{self.zoom():g}X")
+            x += side + self.GAP
+        ax = x + (self.width() - x - win) / 2.0
+        p.drawImage(QtCore.QPointF(ax, (self.height() - win) / 2.0), actual)
+        p.drawText(QtCore.QRectF(x, 8, self.width() - x - self.GAP, 14),
+                   int(QtCore.Qt.AlignmentFlag.AlignHCenter), "ACTUAL SIZE")
+        p.end()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        self._last = time.perf_counter()
+        self._timer.start(16)
+        super().showEvent(event)
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def close_renderer(self) -> None:
+        self._timer.stop()
+        if self.renderer is not None:
+            self.renderer.close()
+            self.renderer = None
+        self.update()
+
+
+class OrbPage(QtWidgets.QWidget):
+    """The orb page. Transparent: `Window` paints what shows through."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tune = orb.Tune.resolve(Config.load().orb_tune)
+        self.sliders: dict[str, Slider] = {}
+        self.values: dict[str, QtWidgets.QLabel] = {}
+        self.suffixes: dict[str, tuple[int, str]] = {}
+        self._loading = False
+        self._build_ui()
+        self._sync_widgets()
+        self.show_state(self.preview.state)
+        # The tray's Appearance menu writes the same key, possibly while this
+        # page is open, so the switch follows the file rather than a snapshot.
+        self._style_stamp: int | None = None
+        self._style_timer = QtCore.QTimer(self)
+        self._style_timer.timeout.connect(self._follow_style)
+        self._follow_style()
+
+    def _build_ui(self) -> None:
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(10)
+        subtitle = QtWidgets.QLabel("Drag a knob and the preview follows. Save puts "
+                                    "it on your screen.")
+        subtitle.setObjectName("sub")
+        subtitle.setFont(tracked(8.5))
+        subtitle.setWordWrap(True)
+        head.addWidget(subtitle, 1)
+        head.addWidget(section("On screen"))
+        looks = QtWidgets.QFrame()
+        looks.setObjectName("switch")
+        segs = QtWidgets.QHBoxLayout(looks)
+        segs.setContentsMargins(3, 3, 3, 3)
+        segs.setSpacing(2)
+        group = QtWidgets.QButtonGroup(self)
+        self.style_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for key, text in (("pill", "Pill"), ("orb", "Orb")):
+            button = QtWidgets.QPushButton(text)
+            button.setObjectName("seg")
+            button.setCheckable(True)
+            button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setAccessibleName(f"Show the {text.lower()}")
+            button.clicked.connect(lambda _=False, k=key: self._set_style(k))
+            group.addButton(button)
+            segs.addWidget(button)
+            self.style_buttons[key] = button
+        head.addWidget(looks)
+        outer.addLayout(head)
+
+        # -- preview --
+        top = Card()
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(14)
+        self.preview = OrbPreview()
+        row.addWidget(self.preview, 1)
+        side = QtWidgets.QWidget()
+        side.setFixedWidth(150)
+        column = QtWidgets.QVBoxLayout(side)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        column.addWidget(section("Preview as"))
+        switch = QtWidgets.QFrame()
+        switch.setObjectName("switch")
+        stack = QtWidgets.QVBoxLayout(switch)
+        stack.setContentsMargins(3, 3, 3, 3)
+        stack.setSpacing(2)
+        group = QtWidgets.QButtonGroup(self)
+        self.state_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for key, text in PREVIEW_STATES:
+            button = QtWidgets.QPushButton(text)
+            button.setObjectName("seg")
+            button.setCheckable(True)
+            button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _=False, k=key: self.show_state(k))
+            group.addButton(button)
+            stack.addWidget(button)
+            self.state_buttons[key] = button
+        column.addWidget(switch)
+        column.addSpacing(4)
+        column.addWidget(section("Voice level"))
+        level_row = QtWidgets.QHBoxLayout()
+        level_row.setSpacing(8)
+        self.level = Slider()
+        self.level.setRange(0, STEPS)
+        self.level.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.level.setAccessibleName("Preview voice level")
+        self.level.setToolTip("How loud the preview's voice is. Ordinary speech "
+                              "at arm's length is somewhere near 15.")
+        self.level.valueChanged.connect(self._on_level)
+        self.level_value = QtWidgets.QLabel()
+        self.level_value.setObjectName("value")
+        self.level_value.setFont(tracked(9, 0.0, mono=True))
+        self.level_value.setMinimumWidth(28)
+        self.level_value.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                      | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        level_row.addWidget(self.level, 1)
+        level_row.addWidget(self.level_value)
+        column.addLayout(level_row)
+        self.talking = Pill("Talking")
+        self.talking.setChecked(True)
+        self.talking.setToolTip("On, the level comes and goes like speech. Off, it "
+                                "holds steady.")
+        self.talking.toggled.connect(lambda on: setattr(self.preview, "talking", on))
+        column.addWidget(self.talking)
+        column.addStretch(1)
+        row.addWidget(side)
+        top.box.addLayout(row)
+        outer.addWidget(top)
+        self.level.setValue(round(self.preview.level * STEPS))
+        self._on_level()
+
+        # -- knobs --
+        knobs = Card()
+        columns = QtWidgets.QHBoxLayout()
+        columns.setSpacing(24)
+        for sections in ORB_KNOBS:
+            grid = QtWidgets.QGridLayout()
+            grid.setVerticalSpacing(4)
+            grid.setHorizontalSpacing(8)
+            r = 0
+            for title, knob_rows in sections:
+                if r:
+                    grid.setRowMinimumHeight(r, 6)
+                    r += 1
+                grid.addWidget(section(title), r, 0, 1, 3)
+                r += 1
+                for name, label, dp, suffix, tip in knob_rows:
+                    caption = QtWidgets.QLabel(label)
+                    caption.setObjectName("knob")
+                    caption.setFont(tracked(8.5))
+                    caption.setToolTip(tip)
+                    grid.addWidget(caption, r, 0)
+                    s = Slider()
+                    lo, hi = orb.RANGES[name]
+                    s.setRange(*((int(lo), int(hi)) if self._whole(name) else (0, STEPS)))
+                    s.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+                    s.setAccessibleName(f"{title} {label}")
+                    s.setToolTip(tip)
+                    s.valueChanged.connect(lambda _v, n=name: self._on_knob(n))
+                    grid.addWidget(s, r, 1)
+                    v = QtWidgets.QLabel()
+                    v.setObjectName("value")
+                    v.setFont(tracked(9, 0.0, mono=True))
+                    v.setMinimumWidth(46)
+                    v.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                   | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    grid.addWidget(v, r, 2)
+                    self.sliders[name] = s
+                    self.values[name] = v
+                    self.suffixes[name] = (dp, suffix)
+                    r += 1
+            grid.setColumnStretch(1, 1)
+            grid.setRowStretch(r, 1)
+            columns.addLayout(grid, 1)
+        knobs.box.addLayout(columns)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        for text, slot in (("Defaults", self._defaults), ("Revert", self._revert)):
+            b = QtWidgets.QPushButton(text)
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(slot)
+            buttons.addWidget(b)
+        save = QtWidgets.QPushButton("Save to config")
+        save.setObjectName("cta")
+        save.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._save)
+        glow = QtWidgets.QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(28)
+        glow.setOffset(0, 4)
+        glow.setColor(QtGui.QColor(109, 40, 217, 150))
+        save.setGraphicsEffect(glow)
+        buttons.addWidget(save)
+        self.save = save
+        knobs.box.addLayout(buttons)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setObjectName("status")
+        self.status.setFont(tracked(8.5))
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(30)
+        knobs.box.addWidget(self.status)
+        outer.addWidget(knobs)
+        outer.addStretch(1)
+
+    @staticmethod
+    def _whole(name: str) -> bool:
+        return isinstance(getattr(orb.Tune(), name), int)
+
+    # -- slider <-> tune -----------------------------------------------------
+
+    def _sync_widgets(self) -> None:
+        """Push the tune into the sliders without reading them back, and into
+        the preview."""
+        self._loading = True
+        try:
+            for name, s in self.sliders.items():
+                value = getattr(self.tune, name)
+                lo, hi = orb.RANGES[name]
+                s.setValue(round(value) if self._whole(name)
+                           else round((value - lo) / (hi - lo) * STEPS))
+        finally:
+            self._loading = False
+        for name in self.sliders:
+            self._label(name)
+        self.preview.motion.tune = self.tune
+
+    def _label(self, name: str) -> None:
+        dp, suffix = self.suffixes[name]
+        value = getattr(self.tune, name) * (100 if suffix == "%" else 1)
+        self.values[name].setText(f"{value + 0.0:.{dp}f}{suffix}")
+
+    def _on_knob(self, name: str) -> None:
+        """Only the knob that moved is read back. Reading them all would snap
+        every untouched value to its slider step, and the shipped look is not
+        on those steps."""
+        if self._loading:
+            return
+        s = self.sliders[name]
+        lo, hi = orb.RANGES[name]
+        value = s.value() if self._whole(name) else lo + (hi - lo) * s.value() / STEPS
+        self.tune = replace(self.tune, **{name: value})
+        self._label(name)
+        self.preview.motion.tune = self.tune
+
+    def _on_level(self) -> None:
+        self.preview.level = self.level.value() / STEPS
+        self.level_value.setText(f"{self.preview.level * 100:.0f}")
+
+    def show_state(self, key: str) -> None:
+        self.preview.state = key
+        self.state_buttons[key].setChecked(True)
+
+    # -- persistence ---------------------------------------------------------
+
+    def changes(self) -> dict:
+        """The knobs that differ from the shipped look by more than one slider
+        step, which is all Save writes. A knob you never moved stays out of the
+        file, and so keeps following the shipped look if that ever changes."""
+        shipped = orb.Tune()
+        out = {}
+        for f in fields(orb.Tune):
+            have, want = getattr(self.tune, f.name), getattr(shipped, f.name)
+            lo, hi = orb.RANGES[f.name]
+            if self._whole(f.name):
+                if have != want:
+                    out[f.name] = have
+            elif abs(have - want) > (hi - lo) / STEPS:
+                out[f.name] = round(have, 4)
+        return out
+
+    def _save(self) -> None:
+        # Merged, like the cue keys: every other setting in the file stays.
+        merge({"orb_tune": self.changes()})
+        if Config.load().overlay_style == "orb":
+            self.status.setText("Saved. The orb on your screen follows within half a "
+                                "second; hold Ctrl+Win to see it with your own voice.")
+        else:
+            self.status.setText("Saved. Shout is showing the pill; switch On screen to "
+                                "Orb to see it.")
+
+    def _set_style(self, style: str) -> None:
+        """Which look the overlay draws. Written to the file, which the running
+        app follows within half a second, the same key the tray menu writes.
+        Leaves the tune alone either way."""
+        merge({"overlay_style": style})
+        self.status.setText("The overlay is the orb now." if style == "orb" else
+                            "The overlay is the pill now. The orb keeps your tune.")
+
+    def _follow_style(self) -> None:
+        """A stat per tick, and a read only when the file changed."""
+        try:
+            stamp = (config_dir() / "config.json").stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+        if stamp == self._style_stamp:
+            return
+        try:
+            style = Config.read().overlay_style
+        except (OSError, ValueError):
+            return                      # mid-write: read it again next tick
+        self._style_stamp = stamp
+        self.style_buttons.get(style, self.style_buttons["pill"]).setChecked(True)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        self._follow_style()
+        self._style_timer.start(500)
+        super().showEvent(event)
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._style_timer.stop()
+        super().hideEvent(event)
+
+    def _defaults(self) -> None:
+        self.tune = orb.Tune()
+        self._sync_widgets()
+        self.status.setText("Back to the shipped look. Save to keep it.")
+
+    def _revert(self) -> None:
+        self.tune = orb.Tune.resolve(Config.load().orb_tune)
+        self._sync_widgets()
+        self.status.setText("Back to what is saved.")
 
 
 class EntryRow(QtWidgets.QFrame):
@@ -1066,7 +1576,7 @@ class Window(QtWidgets.QWidget):
     opened after being closed, so the sounds page reads config.json as it is
     now, not as it was the first time."""
 
-    PAGES = ("recent", "sounds")
+    PAGES = ("recent", "sounds", "orb")
 
     def __init__(self, recent: Recent, page: str = "recent") -> None:
         super().__init__()
@@ -1083,7 +1593,7 @@ class Window(QtWidgets.QWidget):
         segs.setSpacing(2)
         group = QtWidgets.QButtonGroup(self)
         self.tabs: dict[str, QtWidgets.QPushButton] = {}
-        for key, text in zip(self.PAGES, ("Recent dictations", "Cue sounds")):
+        for key, text in zip(self.PAGES, ("Recent dictations", "Cue sounds", "Orb")):
             tab = QtWidgets.QPushButton(text)
             tab.setObjectName("seg")
             tab.setCheckable(True)
@@ -1102,9 +1612,12 @@ class Window(QtWidgets.QWidget):
 
         self.recent_page = RecentPage(recent)
         self.lab = Lab()
+        self.orb_page = OrbPage()
+        self.pages = {"recent": self.recent_page, "sounds": self.lab,
+                      "orb": self.orb_page}
         self.stack = QtWidgets.QStackedWidget()
-        self.stack.addWidget(self.recent_page)
-        self.stack.addWidget(self.lab)
+        for widget in self.pages.values():
+            self.stack.addWidget(widget)
         outer.addWidget(self.stack, 1)
         self.show_page(page)
 
@@ -1117,7 +1630,7 @@ class Window(QtWidgets.QWidget):
         self.resize(600, self.sizeHint().height())
 
     def show_page(self, key: str) -> None:
-        self.stack.setCurrentWidget(self.recent_page if key == "recent" else self.lab)
+        self.stack.setCurrentWidget(self.pages[key])
         self.tabs[key].setChecked(True)
 
     def paintEvent(self, _e: QtGui.QPaintEvent) -> None:
@@ -1147,6 +1660,8 @@ class Window(QtWidgets.QWidget):
         # The sounds page holds an output stream for as long as it exists, and
         # closing the window no longer ends a process that would release it.
         self.lab.cues.close()
+        # And the orb page an OpenGL context of its own.
+        self.orb_page.preview.close_renderer()
         super().closeEvent(event)
 
 

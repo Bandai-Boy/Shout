@@ -47,13 +47,14 @@ Start **Shout** from the Start menu. A tray icon appears, and a pill sits above 
 | Cancel | While holding Ctrl+Win, press any other key. The recording is thrown away, and Windows still gets its shortcut, so Ctrl+Win+D and the rest keep working. |
 | Get back a dictation that didn't paste | **Left-click the tray icon** to copy your last dictation, then click where it goes and press Ctrl+V. For older ones, right-click the tray icon and choose **Recent dictations...** |
 | Change the sounds | Right-click the tray icon and choose **Cue sounds...** |
+| Change the look | Right-click the tray icon and choose **Appearance**, then **Pill** or **Orb**. The orb rests as a small glass capsule and swells into a glowing ring whose crests move with your voice. To adjust the orb (its waves, turbulence, spin, size and colour), choose **Orb look...**, watch the preview, and press **Save to config**. The **On screen** switch on that page also picks between the pill and the orb. |
 | Quit | Right-click the tray icon and choose **Quit Shout**. |
 
 A recording finishes and transcribes on its own after 2 minutes of holding, or 10 minutes hands-free.
 
 ## Settings
 
-Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates the file the first time you save a sound; otherwise, create it yourself. Any key you leave out keeps its default. Quit and restart Shout after editing. Sounds saved on the Cue sounds page are the exception: they apply from the next dictation.
+Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates the file the first time you save a sound; otherwise, create it yourself. Any key you leave out keeps its default. Quit and restart Shout after editing. Sounds saved on the Cue sounds page, and the orb's look saved on the Orb page, are the exceptions: they apply without a restart.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -65,6 +66,8 @@ Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates 
 | `restore_clipboard` | `true` | Puts your previous clipboard back after pasting. |
 | `cues`, `cue_volume` | `true`, `0.25` | Audio cues on or off, and how loud they are. |
 | `overlay` | `true` | Shows the pill. |
+| `overlay_style` | `"pill"` | `"pill"` or `"orb"`. Takes effect without a restart. |
+| `orb_tune` | `{}` | The orb's look, as the settings you changed on the Orb page. Takes effect without a restart. |
 | `ptt_ceiling_s`, `latch_ceiling_s` | `120`, `600` | The automatic stop limits, in seconds. |
 | `tap_max_ms`, `latch_window_ms` | `300`, `350` | How short a press counts as a tap, and how quickly the second tap of a double-tap must follow. |
 

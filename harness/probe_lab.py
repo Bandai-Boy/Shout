@@ -31,6 +31,13 @@ playing the lab's saved voice within a poll or two, with no restart. That was
 missing entirely until 10 Sep. The lab wrote the file and the app only read it
 at launch, so Save looked like it did nothing.
 
+The orb page carries the same round trip for the look: move knobs, press Save,
+resolve `orb_tune` the way the app does, compare field for field, and watch a
+running app's overlay take it. It writes only the knobs you moved, reads back
+only the knob that moved (the shipped values are not on slider steps, so reading
+them all back would quietly change the look), and its preview animates only
+while it is on screen.
+
 The recent page is the way back to a paste that landed nowhere, so its rows are
 about getting the RIGHT words back: a dictation appears without anything
 refreshing the page, Copy on an older row copies that row and not the newest,
@@ -52,6 +59,7 @@ import re
 import sys
 import tempfile
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +76,7 @@ CONFIG = TMP / "Shout" / "config.json"
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from shout import inject as inj  # noqa: E402
+from shout import orb  # noqa: E402
 from shout import window as ui  # noqa: E402
 from shout.__main__ import CONFIG_POLL_MS, Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
@@ -489,6 +498,149 @@ def main() -> int:
           f"volume -> {shout._cue_settings[1]:.2f}")
     CONFIG.write_bytes(full)
     pump(app, 3.0, lambda: shout._cue_settings[1] != 0.3)
+
+    # The overlay's look follows the file the same way. Never built here, so this
+    # is the follow alone; probe_orb swaps looks on a real window.
+    was_style = shout.overlay.style
+    CONFIG.write_text(json.dumps(read_config() | {"overlay_style": "orb"}, indent=2),
+                      encoding="utf-8")
+    took = pump(app, 3.0, lambda: shout.overlay.style == "orb")
+    check(was_style == "pill" and took is not None and shout.tray._style == "orb",
+          "a RUNNING app switches the overlay's look when config.json names one",
+          f"{was_style!r} -> {shout.overlay.style!r}, tray ticks {shout.tray._style!r}")
+    CONFIG.write_bytes(full)
+    took = pump(app, 3.0, lambda: shout.overlay.style == "pill")
+    check(took is not None, "and back when the file goes back",
+          f"style {shout.overlay.style!r}")
+
+    # -- the orb page -----------------------------------------------------------
+    orb_page = win.orb_page
+    preview = orb_page.preview
+    shipped = orb.Tune()
+    check(orb_page.tune == shipped and not orb_page.changes(),
+          "precondition: with no orb_tune in the file, the orb page opens on the "
+          "shipped look")
+    check(preview.drawn == 0 and not preview._timer.isActive(),
+          "the orb preview draws nothing while its page is not showing",
+          f"{preview.drawn} frames, timer active={preview._timer.isActive()}")
+    win.tabs["orb"].click()
+    took = pump(app, 2.0, lambda: preview.drawn >= 20)
+    lit = 0
+    if preview.frames is not None:
+        img = preview.frames[1].convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        lit = int((np.frombuffer(img.constBits(), np.uint8, img.sizeInBytes())[3::4]
+                   > 40).sum())
+    check(preview.renderer is not None and took is not None and lit > 0,
+          "shown, it animates the orb", f"{preview.drawn} frames, {lit} lit pixels "
+          f"at actual size")
+
+    s = orb_page.sliders
+    lo, hi = orb.RANGES["hold_spin"]
+    on_step = lo + (hi - lo) * s["hold_spin"].value() / ui.STEPS
+    check(abs(on_step - shipped.hold_spin) > 1e-6,
+          "precondition: the shipped spin is not on a slider step",
+          f"shipped {shipped.hold_spin:.5f}, nearest step {on_step:.5f}; so reading "
+          f"every slider back would change it")
+    bumps = s["hold_crests"]
+    mouse(bumps, E.MouseButtonPress, bumps.width() * 0.8, LEFT, LEFT)
+    release(bumps, bumps.width() * 0.8)
+    check(bumps.value() != shipped.hold_crests
+          and orb_page.tune == replace(shipped, hold_crests=bumps.value())
+          and preview.motion.tune is orb_page.tune,
+          "a click on Waves changes that one knob, and the preview draws it",
+          f"waves {shipped.hold_crests} -> {orb_page.tune.hold_crests}; every other "
+          f"field {'untouched' if orb_page.tune == replace(shipped, hold_crests=bumps.value()) else 'MOVED'}")
+
+    s["hold_turb"].setValue(700)
+    s["push"].setValue(900)
+    s["hue"].setValue(250)
+    s["rest_w"].setValue(100)
+    before_save = read_config()
+    orb_page.save.click()
+    saved = read_config().get("orb_tune", {})
+    got = orb.Tune.resolve(Config.load().orb_tune)
+
+    def off_by_more_than_a_step(a: orb.Tune, b: orb.Tune) -> list[str]:
+        out = []
+        for f in fields(orb.Tune):
+            lo, hi = orb.RANGES[f.name]
+            step = 0 if isinstance(getattr(a, f.name), int) else (hi - lo) / ui.STEPS
+            if abs(getattr(a, f.name) - getattr(b, f.name)) > step:
+                out.append(f.name)
+        return out
+
+    moved = {"hold_crests", "hold_turb", "push", "hue", "rest_w"}
+    check(set(saved) == moved,
+          "Save writes only the knobs you moved", f"orb_tune keys {sorted(saved)}")
+    off = off_by_more_than_a_step(got, orb_page.tune)
+    check(not off, "and the app resolves exactly the look the page had",
+          f"fields that differ: {off}" if off else "every field within a slider step")
+    nudged = replace(orb_page.tune, hue=orb_page.tune.hue + 1.0)
+    check(off_by_more_than_a_step(got, nudged) == ["hue"],
+          "and that comparison sees one knob a step or two off (control)",
+          f"hue nudged by 1 degree -> {off_by_more_than_a_step(got, nudged)}")
+    after = {k: v for k, v in read_config().items() if k != "orb_tune"}
+    kept = {k: v for k, v in before_save.items() if k != "orb_tune"}
+    check(after == kept and "log_level" in after,
+          "Save leaves every other key in config.json alone",
+          f"{len(after)} other keys, log_level={after.get('log_level')!r}")
+    check("On screen" in orb_page.status.text(),
+          "saving while the pill is on screen says how to see the orb",
+          orb_page.status.text())
+    took = pump(app, 3.0, lambda: shout.overlay.orb_tune == got)
+    check(took is not None,
+          "a RUNNING app's overlay takes the saved orb tune, with no restart",
+          f"after {took * 1000:.0f}ms" if took is not None else
+          f"overlay still has {shout.overlay.orb_tune}")
+
+    button = {b.text(): b for b in orb_page.findChildren(QtWidgets.QPushButton)}
+    button["Defaults"].click()
+    check(orb_page.tune == shipped and not orb_page.changes()
+          and s["hold_crests"].value() == shipped.hold_crests,
+          "Defaults puts every knob back on the shipped look",
+          f"changes left: {orb_page.changes()}")
+    button["Revert"].click()
+    check(not off_by_more_than_a_step(orb_page.tune, got),
+          "and Revert brings back what is saved",
+          f"differs in {off_by_more_than_a_step(orb_page.tune, got)}")
+    button["Defaults"].click()
+    orb_page.save.click()
+    took = pump(app, 3.0, lambda: shout.overlay.orb_tune == shipped)
+    check(read_config().get("orb_tune") == {} and took is not None,
+          "saving the defaults empties orb_tune, and the app goes back to the shipped look",
+          f"orb_tune={read_config().get('orb_tune')}")
+
+    # The look switch on the page, which writes the key the tray menu writes.
+    looks = orb_page.style_buttons
+    check(looks["pill"].isChecked() and not looks["orb"].isChecked()
+          and shout.overlay.style == "pill",
+          "precondition: the page's switch opens on the look the file names",
+          f"pill checked={looks['pill'].isChecked()}, app on {shout.overlay.style!r}")
+    before_switch = {k: v for k, v in read_config().items() if k != "overlay_style"}
+    looks["orb"].click()
+    took = pump(app, 3.0, lambda: shout.overlay.style == "orb")
+    check(read_config().get("overlay_style") == "orb" and took is not None
+          and shout.tray._style == "orb",
+          "switching to Orb on the page puts the orb on a RUNNING app's screen",
+          f"file {read_config().get('overlay_style')!r}, app {shout.overlay.style!r}, "
+          f"tray ticks {shout.tray._style!r}")
+    check({k: v for k, v in read_config().items() if k != "overlay_style"}
+          == before_switch,
+          "and touches no other key, the tune included")
+    looks["pill"].click()
+    took = pump(app, 3.0, lambda: shout.overlay.style == "pill")
+    check(took is not None and shout.tray._style == "pill",
+          "and Pill switches it back", f"app {shout.overlay.style!r}")
+    # The tray's Appearance menu, while the page is open: through the file, the
+    # way Shout.set_overlay_style writes it.
+    CONFIG.write_text(json.dumps(read_config() | {"overlay_style": "orb"}, indent=2),
+                      encoding="utf-8")
+    took = pump(app, 3.0, lambda: looks["orb"].isChecked())
+    check(took is not None and not looks["pill"].isChecked(),
+          "a look picked from the tray while the page is open moves the page's switch",
+          f"after {took * 1000:.0f}ms" if took is not None else "switch still on pill")
+    looks["pill"].click()
+    pump(app, 3.0, lambda: shout.overlay.style == "pill")
     shout._config_timer.stop()
     shout.cues.close()
 
@@ -497,7 +649,7 @@ def main() -> int:
     win.tabs["recent"].click()
     app.processEvents()
     check(win.stack.currentWidget() is page and win.tabs["recent"].isChecked()
-          and not win.tabs["sounds"].isChecked(),
+          and not any(win.tabs[k].isChecked() for k in ("sounds", "orb")),
           "clicking a tab shows its page and marks only that tab",
           type(win.stack.currentWidget()).__name__)
     check(page.empty.isVisible() and not page.shown and not page.clear.isEnabled(),
@@ -613,9 +765,13 @@ def main() -> int:
     # closeEvent releases the sounds page's output stream.
     check(lab.cues._stream is not None,
           "precondition: the sounds page holds an open output stream")
+    check(preview.renderer is not None,
+          "precondition: the orb page holds an OpenGL renderer")
     win.close()
     check(lab.cues._stream is None, "closing the window releases that stream",
           "or every open/close of the window leaks one inside Shout")
+    check(preview.renderer is None and not preview._timer.isActive(),
+          "and the orb preview's renderer and timer")
     app.quit()
 
     for ok, name, detail in rows:

@@ -230,25 +230,79 @@ def main() -> int:
             # exactly what a gate must never do.
             stage("driver: end latch and commit")
             app.ready.set()
-            app.transcriber = SimpleNamespace(transcribe=lambda audio: "first probe words")
+            entered, release = threading.Event(), threading.Event()
+
+            def held(text: str) -> SimpleNamespace:
+                """A transcriber that stays busy until the probe releases it, so
+                the pill can be looked at while the commit is still in flight."""
+                def transcribe(audio) -> str:
+                    entered.set()
+                    release.wait(5)
+                    return text
+                return SimpleNamespace(transcribe=transcribe)
+
+            def says_transcribing(how: str) -> None:
+                # The watchdog dispatches every 20ms whatever else is happening,
+                # and every dispatch republishes the state. That is what put the
+                # pill back to idle one tick into each commit, however long the
+                # model then took, and a transcriber that returns at once can
+                # never see it. These TICKs are the exact call the watchdog makes.
+                reached = entered.wait(2)
+                ticks, end = 0, time.perf_counter() + 0.5
+                while time.perf_counter() < end:
+                    app._dispatch(app.gestures.handle(Event.TICK, time.perf_counter()))
+                    ticks += 1
+                    time.sleep(0.02)
+                want = app.overlay.expanded_width_for("working")
+                check(reached and ticks >= 10 and app.overlay.state == "working"
+                      and abs(app.overlay.pill_width - want) < 1.0,
+                      f"{how}: the pill says Transcribing until the model returns",
+                      f"reached the model: {reached}; after {ticks} watchdog ticks "
+                      f"{app.overlay.state!r} at {app.overlay.pill_width:.0f}px, "
+                      f"want 'working' at {want:.0f}px")
+                release.set()
+
+            def wait_for_collapse() -> None:
+                for _ in range(80):          # _finish runs on the commit thread
+                    if app.overlay.pill_width - COLLAPSED_W < 1.0:
+                        break
+                    time.sleep(0.05)
+
+            app.transcriber = held("first probe words")
             app._dispatch(app.gestures.handle(Event.CHORD_DOWN, t + 0.40))
             app._dispatch(app.gestures.handle(Event.CHORD_UP, t + 0.45))
             check(played[-1] == "stop", "stop cue fired when the latch ended",
                   f"cues={played}")
             check(app.gestures.state.value == "idle", "back to idle",
                   app.gestures.state.value)
+            stage("driver: transcribing after the latch")
+            says_transcribing("latched")
 
             # It no longer disappears, so what settling looks like is the pill
             # collapsing — asserting visibility here would now pass forever.
             stage("driver: waiting for collapse")
-            for _ in range(80):          # _finish runs on the commit thread
-                if app.overlay.pill_width - COLLAPSED_W < 1.0:
-                    break
-                time.sleep(0.05)
+            wait_for_collapse()
             check(visible(hwnd), "still on screen once the commit settles",
                   f"state={app._tray_state()}")
             check(abs(app.overlay.pill_width - COLLAPSED_W) < 1.0,
                   "collapsed again once the commit settles",
+                  f"width={app.overlay.pill_width:.0f}")
+
+            # --- the same after a hold, which commits from another state ----
+            # An empty transcript: nothing is pasted or listed, so the recent
+            # rows below still see only the first dictation.
+            stage("driver: transcribing after a hold")
+            entered.clear()
+            release.clear()
+            app.transcriber = held("")
+            t2 = time.perf_counter()
+            app._dispatch(app.gestures.handle(Event.CHORD_DOWN, t2))
+            time.sleep(0.4)          # real audio: a clip under 0.25s is dropped, not committed
+            app._dispatch(app.gestures.handle(Event.CHORD_UP, t2 + 0.4))
+            says_transcribing("hold")
+            wait_for_collapse()
+            check(abs(app.overlay.pill_width - COLLAPSED_W) < 1.0,
+                  "hold: collapsed again once the model returns",
                   f"width={app.overlay.pill_width:.0f}")
 
             # --- the way back to a paste that landed nowhere ----------------
@@ -268,7 +322,8 @@ def main() -> int:
             app.transcriber = SimpleNamespace(transcribe=lambda audio: "zebra quartz umbrella")
             logging.disable(logging.CRITICAL)       # the traceback is expected
             try:
-                app._finish([0.0] * 16000, time.perf_counter())
+                app._queue_commit([0.0] * 16000)
+                app.commits.submit(lambda: None).result(timeout=5)   # queued behind it
             finally:
                 logging.disable(logging.NOTSET)
                 inj.inject = fake_inject
@@ -320,10 +375,28 @@ def main() -> int:
     # real question about the app. Through the real menu actions, on the GUI
     # thread, the way a click delivers them.
     labels = [a.text() for a in app.tray._menu.actions() if not a.isSeparator()]
-    check(labels == ["Recent dictations...", "Cue sounds...", "Quit Shout"],
-          "the tray menu opens either page of the window, and quits",
+    check(labels == ["Recent dictations...", "Cue sounds...", "Orb look...", "Appearance",
+                     "Quit Shout"],
+          "the tray menu opens each page of the window, picks a look, and quits",
           f"menu={labels}")
     actions = {a.text(): a for a in app.tray._menu.actions()}
+    # Before the overlay is built, so no window is swapped and the pill rows
+    # below still run on the pill. The save is captured: this gate must never
+    # write the real config.json.
+    looks = {a.text(): a for a in actions["Appearance"].menu().actions()}
+    saved: list[dict] = []
+    real_merge = shout_main.merge
+    shout_main.merge = saved.append
+    started_on_pill = looks["Pill"].isChecked() and not looks["Orb"].isChecked()
+    looks["Orb"].trigger()
+    went_orb = app.overlay.style == "orb" and looks["Orb"].isChecked()
+    looks["Pill"].trigger()
+    shout_main.merge = real_merge
+    check(started_on_pill and went_orb and app.overlay.style == "pill"
+          and looks["Pill"].isChecked()
+          and saved == [{"overlay_style": "orb"}, {"overlay_style": "pill"}],
+          "Appearance switches the overlay's look and saves the choice",
+          f"started on pill={started_on_pill} went orb={went_orb} saved={saved}")
     actions["Cue sounds..."].trigger()
     first = app.window
     check(first is not None and first.isVisible()
@@ -336,6 +409,10 @@ def main() -> int:
           type(app.window.stack.currentWidget()).__name__)
     check(first.recent_page.recent is app.recent,
           "and its list reads the store Shout fills, not a copy")
+    actions["Orb look..."].trigger()
+    check(app.window is first and first.stack.currentWidget() is first.orb_page,
+          "Orb look... switches it to the orb page",
+          type(app.window.stack.currentWidget()).__name__)
     first.close()
     actions["Recent dictations..."].trigger()
     check(app.window is not first and app.window.isVisible(),

@@ -32,7 +32,7 @@ import shout.overlay as overlay_mod  # noqa: E402
 from shout.overlay import (BAR_MAX_H, COLLAPSED_H, COLLAPSED_W, DOT_INSET,  # noqa: E402
                            GA_ROOT, GW_HWNDPREV, GWL_EXSTYLE, HEIGHT, LABEL_GAP,
                            MAX_PILL_W, METER_GAP, METER_W, MARGIN_Y, RIGHT_INSET,
-                           SHADOW, SWP_RESTACK, WANTED_EXSTYLE, WIN_H, WIN_W,
+                           SWP_RESTACK, WANTED_EXSTYLE, WIN_H, WIN_W,
                            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
                            WS_EX_TRANSPARENT, Overlay, _get_long, expanded_width,
                            fullscreen_monitors, notification_state, user32)
@@ -99,27 +99,24 @@ def stacked_above(upper: int, lower: int) -> bool:
 GREY = QtGui.QColor(128, 128, 128)
 
 
-def render(ov: Overlay) -> QtGui.QImage:
-    """The window as the painter draws it, over opaque neutral grey. Grey can
-    carry no hue of its own, so any tint read off the result is the pill's."""
+def render(ov: Overlay, ground=GREY) -> QtGui.QImage:
+    """The window as the painter draws it, over opaque neutral grey by default.
+    Grey can carry no hue of its own, so any tint read off the result is the pill's."""
     img = QtGui.QImage(WIN_W, WIN_H, QtGui.QImage.Format.Format_ARGB32)
-    img.fill(GREY)
+    img.fill(ground)
     ov.widget.render(img, QtCore.QPoint(0, 0), QtGui.QRegion(),
                      QtWidgets.QWidget.RenderFlag.DrawChildren)
     return img
 
 
-def body_rows(img: QtGui.QImage) -> list[int]:
-    """Rows of the centre column the pill covers, measured off the pixels. The
-    shadow darkens the grey by ~15 at most; the body, dot and bars all differ
-    from it by far more than 40."""
+def body_rows(ov: Overlay) -> list[int]:
+    """Rows of the centre column the pill paints, read off the alpha of a render
+    onto nothing. Not off the grey: the 45% rim over the 75% body over grey 128
+    reads 132-133 (measured 12 Sep 2026), so both rim rows passed for bare
+    ground and the idle sliver measured 8px instead of 10."""
+    img = render(ov, QtCore.Qt.GlobalColor.transparent)
     x = WIN_W // 2
-    out = []
-    for y in range(WIN_H):
-        c = img.pixelColor(x, y)
-        if max(abs(c.red() - 128), abs(c.green() - 128), abs(c.blue() - 128)) > 40:
-            out.append(y)
-    return out
+    return [y for y in range(WIN_H) if img.pixelColor(x, y).alpha() > 40]
 
 
 def tint(img: QtGui.QImage, x: int, y: int) -> int:
@@ -192,10 +189,8 @@ def main() -> int:
     # -- placement ----------------------------------------------------------
     a = ov.work_area()
     check(visible(hwnd), "visible while recording")
-    # The window carries a painted shadow margin, so the PILL's bottom edge is
-    # SHADOW px above the window's. Asserting the window rect would silently
-    # bake the shadow into the gap and drift the pill on any shadow change.
-    pill_bottom = r.bottom - SHADOW
+    # The window has no margin around the pill, so its bottom edge is the pill's.
+    pill_bottom = r.bottom
     check(pill_bottom <= a.bottom() + 1, "sits inside the work area",
           f"pill bottom={pill_bottom} work bottom={a.bottom()}")
     check(abs((a.bottom() + 1 - pill_bottom) - MARGIN_Y) <= 1,
@@ -232,7 +227,7 @@ def main() -> int:
                 continue
             a, r = scr.availableGeometry(), rect(hwnd)
             want = (a.left() + (a.width() - WIN_W) // 2,
-                    a.bottom() + 1 - MARGIN_Y + SHADOW - WIN_H)
+                    a.bottom() + 1 - MARGIN_Y - WIN_H)
             away = scr.name() != focus_name
             exercised += away
             check(abs(r.left - want[0]) <= 1 and abs(r.top - want[1]) <= 1,
@@ -329,7 +324,7 @@ def main() -> int:
     # Height is read off the painted pixels rather than off pill_height: a
     # painter that ignored the attribute would still pass an attribute check.
     idle_img = render(ov)
-    idle_rows = body_rows(idle_img)
+    idle_rows = body_rows(ov)
     check(abs(len(idle_rows) - COLLAPSED_H) <= 1,
           "idle is painted as the thin sliver, not at full height",
           f"measured {len(idle_rows)}px want {COLLAPSED_H}px (expanded is {HEIGHT}px)")
@@ -348,6 +343,29 @@ def main() -> int:
     overlay_mod.BG = noir
     check(old_spread >= 3, "CONTROL: the old blue-black body reads as tinted here",
           f"channel spread {old_spread}")
+    # The rim's opacity comes off the same pixel rendered with no rim at all:
+    # white at opacity a over a pixel p reads p + (255 - p) * a.
+    border = overlay_mod.BORDER
+    overlay_mod.BORDER = QtGui.QColor(255, 255, 255, 0)
+    bare_idle = render(ov)
+    overlay_mod.BORDER = border
+    top = idle_rows[0] if idle_rows else 0
+    on, under = idle_img.pixelColor(body_x, top).red(), bare_idle.pixelColor(body_x, top).red()
+    rim_a = (on - under) / (255 - under) if under < 255 else 0.0
+    check(bool(idle_rows) and abs(rim_a - 0.45) < 0.02 and tint(idle_img, body_x, top) <= 1,
+          "the rim is neutral white at 45%",
+          f"measured {rim_a:.3f}: the top edge reads {on}, and {under} with no rim")
+    # Black at opacity a over the grey leaves grey * (1 - a), so a comes off the pixel.
+    opacity = 1.0 - idle_img.pixelColor(body_x, mid_y).red() / GREY.red()
+    check(abs(opacity - 0.75) < 0.01, "the body is 75% opaque", f"measured {opacity:.3f}")
+    left = (WIN_W - ov.pill_width) / 2.0
+    around = [idle_img.pixelColor(int(px), mid_y) for px in
+              (left - 6, left - 2, left + ov.pill_width + 1, left + ov.pill_width + 5)]
+    if idle_rows:
+        around.append(idle_img.pixelColor(WIN_W // 2, idle_rows[0] - 3))
+    touched = sum(1 for c in around if c.rgb() != GREY.rgb())
+    check(len(around) == 5 and touched == 0, "no shadow: the ground around the pill is untouched",
+          f"{touched} of {len(around)} pixels beside and above the idle pill differ from the grey")
 
     rec_w = ov.expanded_width_for("recording")
     ov.set_state("recording")
@@ -359,9 +377,27 @@ def main() -> int:
     spin(0.9)
     check(abs(ov.pill_width - rec_w) < 1.0, "recording expands to its state width",
           f"width={ov.pill_width:.1f} want={rec_w:.0f}")
-    rec_rows = body_rows(render(ov))
+    rec_img = render(ov)
+    rec_rows = body_rows(ov)
     check(abs(len(rec_rows) - HEIGHT) <= 1, "recording is painted at full height",
           f"measured {len(rec_rows)}px want {HEIGHT}px")
+    # Painting the rim may change only the rim: a pen left set after it rings
+    # the dot and halo too. Diffed against a render with no rim, because a 45%
+    # ring over the red dot is nowhere near white.
+    border = overlay_mod.BORDER
+    overlay_mod.BORDER = QtGui.QColor(255, 255, 255, 0)
+    bare_rec = render(ov)
+    overlay_mod.BORDER = border
+    dot_cx = (WIN_W - ov.pill_width) / 2.0 + DOT_INSET
+    dot_cy = HEIGHT / 2.0
+    reach = overlay_mod.DOT_R + overlay_mod.HALO_R + 1
+    near = [(px, py) for px in range(int(dot_cx - reach), int(dot_cx + reach) + 1)
+            for py in range(int(dot_cy - reach), int(dot_cy + reach) + 1)]
+    dot_px = sum(1 for px, py in near if rec_img.pixelColor(px, py).red() >= 200
+                 and rec_img.pixelColor(px, py).green() <= 100)
+    ring_px = sum(1 for px, py in near if rec_img.pixel(px, py) != bare_rec.pixel(px, py))
+    check(dot_px > 0 and ring_px == 0, "the recording dot carries no ring from the rim's pen",
+          f"{dot_px} dot pixels, {ring_px} around it change when the rim is painted")
     check(bool(idle_rows and rec_rows) and idle_rows[-1] == rec_rows[-1],
           "the bottom edge stays put; the pill grows upward",
           f"bottom row idle={idle_rows[-1] if idle_rows else None} "

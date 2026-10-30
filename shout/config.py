@@ -59,6 +59,12 @@ class Config:
     # input_device; see shout.devices.
     output_device: int | None = None
     overlay: bool = True             # the state pill above the taskbar
+    # "pill" or "orb": which look the overlay draws. Followed live, and set from
+    # the tray's Appearance menu.
+    overlay_style: str = "pill"
+    # The orb's look, as shout.orb.Tune fields that differ from the shipped one.
+    # Written by the Orb page of the Shout window, and followed live.
+    orb_tune: dict = field(default_factory=dict)
 
     # --- diagnostics ---
     log_level: str = "INFO"
@@ -87,3 +93,18 @@ class Config:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         return path
+
+
+def merge(keys: dict) -> Path:
+    """Write these keys into config.json, keeping everything else in the file.
+    Config.save() would write one process's defaults over settings it knows
+    nothing about, which is why nothing that runs alongside Shout uses it."""
+    path = config_dir() / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    raw.update(keys)
+    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    return path

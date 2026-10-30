@@ -54,8 +54,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # sync, model, sho
 
 ## The Shout window
 
-`shout/window.py` is one window with two pages, **Recent dictations** and **Cue
-sounds**, opened from the tray menu (an entry per page). It runs INSIDE Shout's
+`shout/window.py` is one window with three pages, **Recent dictations**, **Cue
+sounds** and **Orb**, opened from the tray menu (an entry per page). It runs INSIDE Shout's
 process, on the GUI thread; the cue lab used to be a separate `scripts/cue_lab.py`
 process and moved in on 10 Sep, because the recent dictations live only in
 Shout's memory (`shout/recent.py`, the last 10) and a second process could only
@@ -92,6 +92,102 @@ needing 85).
 **Re-run `harness/probe_cues.py` after saving a new voice:** that gate reads the
 configured voice and asserts the cue stays inert in the transcript, which is a
 property of the sound, not of the code.
+
+## The orb
+
+`overlay_style` in config.json picks the overlay's look, `pill` (the default) or
+`orb`, switched live from the tray's **Appearance** menu or by editing the file.
+`Overlay` owns placement, fullscreen hiding and keep-on-top for both; only the
+widget differs (`PillWidget` / `OrbWidget`, whose flags both come from
+`OverlayWindow`).
+
+`shout/orb.py` is the GLSL from the voice-powered-orb React component, ported.
+It renders in an offscreen OpenGL context to a QImage that the plain translucent
+window paints, so none of the window's measured Win32 behaviour depends on how Qt
+composites OpenGL into a layered window. That was a design choice: a
+QOpenGLWidget inside the overlay window was never tried.
+
+At rest the orb is a 40x10 glass capsule (a see-through body inside an opaque
+rim) whose rim colour circles. It is the one resting look that animates, so
+`OrbWidget.resting()` drops the overlay to its idle tick (~21 frames/s measured).
+Measured 17 Sep 2026 on the running app, 30s each: 2.3% of one core idle on the
+pill, 3.2-4.7% on the orb. Every expanded state inflates it to a 72px ring.
+
+The ring is **water**, not geometry (Gabe's call, 17 Sep — the crest it replaced
+was a raised sine to a power, and at its shipped spikiness of 3 it read as a
+star, while turning that knob DOWN pinched the troughs into a flower).
+
+There are **two waters**, and since 17 Sep they carry the SAME crest count (9):
+what tells the states apart is the shape, not the number. `wave()` is holding —
+one swell of K crests leaning the way it travels, its neighbouring counts K±1
+beating against it so no two crests match, and ripples capped at `RIPPLE_K`
+lobes so a high count cannot read as a gear. `ripples()` is hands-free — the
+same swell carrying two octaves of smaller, faster waves, which reads as texture
+rather than as height. They turn opposite ways, and hands-free also breathes.
+`probe_orb` measures the separation as the strongest wave between three and five
+times the crest count, where the swell has no term at all: 0.154 hands-free
+against 0.049 holding, with the swell drawing hands-free as its control (0.053).
+
+Three things about the maths are load-bearing and were each measured:
+
+- **Both waves divide by the sum of their own terms**, so each peaks at exactly
+  1 and `height` means the tip in px. Dividing by 0.6 of the sum, as `wave()`
+  did until 17 Sep, let the terms stack to 1.23x wherever they lined up — a few
+  crests standing a quarter taller than their neighbours, which IS a star's
+  point, and is what Gabe was seeing at a raised voice. Fixing it took a
+  quarter off every crest at every level.
+- **`ripples()`' octaves run at 2K+1 and 4K+1, never 2K and 4K.** At the exact
+  multiples they are harmonics: they lock to the swell, every crest becomes the
+  same peaked waveform, and it measured 6.77 tip over trough where a sine
+  measures 1.00. Offset by one they beat against the swell instead. Measured
+  1.00 — rounder than the holding swell's own 1.64. **If you ever "simplify"
+  those to round multiples, the star comes straight back.**
+- **`voice_drive()` is gated then raised to `VOICE_CURVE` (0.40), not square
+  rooted.** The curve decides how much of your voice lands at arm's length
+  rather than at a shout, and it is the ONLY knob that does: flattening the
+  crests and lowering `push` both take the loud end down and the response with
+  it. Taking a quarter off the crests without moving the curve dropped ordinary
+  speech from 1.52x to 1.36x, under the gate's floor. At 0.40 it reads 1.57x.
+
+The voice both raises the waves (`push`) and roughens them (`ROUGH`), since
+steepness is what turns a ring of waves into a star — most of a loud orb's
+energy has to arrive as finer waves, not taller ones. Raising `ROUGH` does NOT
+buy back volume response, measured: it moves energy from the swell into the
+sidebands, so the dominant wave gets *smaller*.
+Transcribing has no crests, and one comet goes round a dimmed ring. Motion per
+state is the `MOTION` table; phases accumulate, so a change of speed never jumps
+the picture. If OpenGL fails at start or mid-render, the overlay logs it and
+draws the pill, and the tray ticks what is actually on screen.
+
+Every knob is a field of `orb.Tune` (defaults = the shipped look, asserted
+against the pre-Tune literals by `probe_orb`). The **Orb** page edits it with a
+preview that is the overlay's own Renderer and Choreography, and Save merges
+only the fields that moved as `orb_tune`, which a running Shout follows. Save
+never switches the look (Gabe's call, 17 Sep); the page's On screen switch does,
+by writing `overlay_style` and polling the file so a tray pick moves it. The
+page reads back ONLY the slider that moved: the shipped spins are not on slider
+steps, so reading them all back quietly changes the look (`probe_lab` row, with
+that mutation as its control). The overlay window is no longer a fixed 96px:
+`Tune.win` and `Tune.bottom_pad` are derived from the loudest frame the tune can
+draw (96px and 19px shipped, from a `PEAK` of exactly 1), which also fixed the
+glow clipping at meter 1.0,
+and `Overlay.set_orb_tune` rebuilds the widget when the size changes.
+
+`harness/probe_orb.py` pins fullscreen detection off, because its rest rows need
+the orb on screen. It reads crests off the rendered ring (the most opaque radius
+at each degree, then the strongest wave in that profile), so **re-run it after
+changing `MOTION`, `VOICE_CURVE` or the `Tune` defaults**: the ripple separation,
+"ordinary speech visibly raises the waves" at meter 0.15 (0.68 -> 1.07px holding,
+0.88 -> 1.65px hands-free, measured 17 Sep), the roundness ceiling and the comet
+are all claims about the SHIPPED numbers. Two of its floors are **fractions of
+`Tune.height`** rather than px, and that is deliberate: the 17 Sep normalisation
+made the same tune draw a crest 23% shorter by construction, so a px floor
+measured on the old scale would have failed a ring exactly as wavy as before.
+What stops those rows passing on a smooth ring is that transcribing, which has
+no crests, reads 0.42px against their 0.56px floor — the two rows are pinned
+against each other. A tune Gabe saves from the Orb page is his taste and
+is deliberately not gated. It asserts the resting frame rate, not CPU: the probe process's
+own CPU time read 9% at rest against 7% expanded, so it measures the harness.
 
 ## Invented trailing phrases
 
@@ -542,6 +638,136 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   case and read the query's own answer. A row that sets the flag by hand can
   never notice a query that doesn't fire.
 
+- [2026-09-10] Raising the pill's rim from white at 10% (alpha 26) to full
+  white exposed a leak that had always been there. `paintEvent` never reset the
+  pen after stroking the rim, so the halo and the dot were outlined with it too,
+  invisible at 10%. At full white they got a white ring. `setPen(NoPen)` now
+  follows the rim. -> Before making a translucent paint value opaque, check
+  what's drawn after it: a faint value can hide painter state leaking into
+  later shapes.
+  [2026-09-12] The rim is now **45% white** (alpha 115); the body stays 75%
+  opaque. Dimming it blinded three `probe_overlay` measurements that had been
+  calibrated at full white. 45% white over the 75% body over the probe's grey
+  128 reads 132-133, so `body_rows`' "differs from grey by 40" test lost both
+  rim rows and measured the idle sliver at 8px, not 10. A 45% ring over the red
+  dot is nowhere near white, so the near-white ring test went blind, and the
+  ">= 250" rim test would simply have failed. Painted rows now come from the
+  ALPHA of a render onto nothing (220 on a rim row, 191 on the body). The rim's
+  opacity is `(on - under) / (255 - under)` against the same pixel rendered
+  with the rim at alpha 0 (0.448-0.453 depending on `pill_height`'s 0.01px
+  dead-band, so the row allows +-0.02), and the ring row diffs the dot's
+  neighbourhood against that rim-free render. Controls: the old solid rim fails
+  only the rim row (0.987), and dropping the `setPen` fails only the ring row
+  (51 pixels). -> A test that detects a paint value by threshold is calibrated
+  to that value. Measure against a render without it instead, and the test
+  survives the next tweak.
+
+- [2026-09-12] **The pill never showed Transcribing in real use.** `_finish`
+  set "working" once, but the watchdog calls `_dispatch()` on every 20ms TICK,
+  `_dispatch()` always ends in `_publish_state()`, and `_tray_state()` had no
+  term for a commit in flight. The pill went back to idle one tick into every
+  commit, held or latched: a 194s passage spent 2.62s transcribing behind the
+  idle sliver. Now `_queue_commit()` takes a count under `_state_lock`,
+  `_finish`'s `finally` releases it, and `_tray_state()` says "working" while
+  it is non-zero (capture still wins). No gate could see it: `probe_overlay`
+  sets "working" by hand, and `probe_app`'s stub transcriber returned at once,
+  so no commit was ever in flight across a tick. `probe_app` now holds its stub
+  transcriber open, sends TICKs through `_dispatch` exactly as the watchdog
+  does, and asserts the pill is 'working' at its 251px width after an unlatch
+  and after a hold. Control: the committed `__main__.py` fails exactly those
+  two rows (pill 'idle' at 52px) and nothing else. -> A state written once by a
+  worker lasts only until the next republish. Derive it where the republisher
+  looks, and give the gate a slow stub, because a fast one never overlaps.
+
+- [2026-09-16] **The cues went silent and the cause is still unknown.** The
+  running Shout had NO render session on any active endpoint, while a fresh
+  process opening `Cues` the same way played on the default (the control).
+  Refuted, each measured with a control: a default switch, disabling the
+  endpoint the stream is on (Windows migrates it), a PS4 controller's USB audio
+  arriving and leaving (`harness/probe_hotplug.py`: CONTROL kept playing), a
+  second `Cues` opened and closed in the same process (the cue lab), and sleep
+  (none during that process's life). Not examined: game launches (Auto HDR
+  notices at 11:47:41 and 12:29:32) and HDMI endpoints flickering at monitor
+  wake. `Cues` now runs a watcher thread that reopens the stream when
+  `devices.default_output()` changes, or when the stream stops or stalls. It is
+  proven on an aborted stream (reheard within 0.5s, while the no-watcher
+  control stays silent) and did not misfire through a 20s GPU warmup. It is
+  **not** proven against the real failure, whose signature is unknown. **When
+  the cues go silent again, do not restart Shout first:** read its sessions
+  (`probe_route.sessions(pid, RENDER)`), grep `shout.log` for `reopening`, and
+  run `uvx py-spy dump --pid <shoutw pid> --native` (verified to attach here) to
+  see whether the PortAudio thread is gone, blocked or still calling back.
+  Restarting destroys the only evidence; that is exactly how it was lost this
+  time, since the process had been quit before it could be dumped. Separately,
+  **the controller takes the default MIC** (its earphone endpoint was already
+  disabled). The endpoint is now disabled with
+  `IPolicyConfig::SetEndpointVisibility`, which works unelevated, even on a
+  not-present endpoint, and survived a replug with both defaults untouched.
+  Endpoints are per USB port, so another port may bring it back. Harness traps
+  from the same run: a child's first stdout line was a `cues ready` log line,
+  not its PID, so the parent measured pid 230; a kill by path regex missed the
+  parent launched with a relative path; and -48dBFS blips were plainly audible
+  over minutes of waiting, while -90dBFS still reads on the session meter.
+- [2026-09-17] **Smart App Control blocked a .pyd at boot and Shout came up
+  with no model.** `av/video/stream.pyd` is unsigned, SAC (enforcing on this
+  box, `VerifiedAndReputablePolicyState=1`) judges an unsigned file by cloud
+  reputation, and Defender was still updating: its first successful cloud
+  lookup was 10:38:31, the block 10:37:12. The same file loaded fine three
+  minutes later, so it was transient. The tray, orb and hotkey all came up
+  normally — only `_load_model` failed, with `ImportError: DLL load failed
+  while importing stream: An Application Control policy has blocked this file.`
+  Diagnose from the CodeIntegrity log, event 3077, which names the file and the
+  process; the SAC state is that registry value. `_load_model` now retries a
+  block over 5 minutes (`BLOCK_RETRY_S`) and reports anything else at once, as
+  before. Two measured findings behind it. (1) **Retrying in the same process
+  works, but only after forgetting the pure-Python modules the failed attempt
+  left behind**: a package re-run on retry finds its submodules cached and
+  never binds them to itself, so asyncio dies on `base_events` not defined.
+  Compiled modules must STAY — Cython refuses to initialise one twice. (2) The
+  blast radius is 58 unsigned compiled modules, stdlib included (uv's Python is
+  unsigned too); `harness/probe_load.py` fakes a block where Python's own loader
+  raises one, and the sweep over all 58 is 50 blocked-and-recovered + 8 optional
+  accelerators whose libraries fall back silently. The classifier is anchored on
+  the line copied out of shout.log, never on the injected text. **Still
+  uncovered:** a block on anything imported at startup (PySide6, numpy,
+  sounddevice) kills the process before the tray exists, and retry-in-place
+  cannot help there.
+- [2026-09-17] **An F11 editor fails rows in two gates at once.** With a
+  `Chrome_WidgetWin_1` window (VS Code or Chrome) fullscreen on the monitor the
+  mouse was on, `probe_overlay` went 63/70: its `idle` and `loading` persistence
+  rows plus the five fullscreen-staging rows, which found that monitor instead of
+  the staged one. `probe_app` failed its "nothing is fullscreen" precondition and
+  the two rows behind it. Neither was a regression, since the pill hides at rest
+  on a fullscreen screen by design: `fullscreen_state()` named the 3440x1440
+  monitor, and the foreground window covered it exactly. It was proven by
+  re-running the persistence rows with detection pinned off (all five states
+  visible), beside a forced-fullscreen control (exactly `idle` and `loading`
+  hidden). -> Before reading any
+  overlay or app gate failure, run `fullscreen_state()` and `cursor_monitor()`
+  once, and ask for the editor to leave fullscreen if they match.
+
+- [2026-09-18] **Smart App Control blocked a second file at boot, and the retry
+  built for it did not fire.** This time `ctranslate2.dll`, blocked on the
+  `ctypes.CDLL` in `ctranslate2/__init__.py`, with a Windows "bad image" dialog
+  (status 0xc0e90002) beside it; CodeIntegrity 3077 named the file at 10:53:39.
+  `_load_model` reported at once instead of retrying, and `shout.log` has no
+  `retrying in` line to show for it. Cause: **Windows' message for error 4551
+  reaches Python in two spellings, and the classifier held the longer one.**
+  `ctypes.FormatError(4551)` keeps the trailing period FormatMessage returns,
+  while CPython strips trailing dots when it builds an `OSError` -- so the
+  constant ended in `file.` and the logged `OSError` ended in `file`, and the
+  substring test was False. The 17 Sep block arrived as an `ImportError`, which
+  keeps the period, so the gate row anchored on that line passed throughout.
+  `BLOCKED_BY_WINDOWS` is now `.rstrip(" .")` and `probe_load` carries both
+  observed lines; the pre-fix constant fails the new row and only that row. The
+  retry would have covered this: a fresh process loaded the same DLL 17s after
+  the give-up. -> A classifier anchored on ONE real log line is only proof
+  against the wording you have already seen. When the same OS condition can
+  surface through two Python layers (import machinery vs `ctypes`, an exception
+  vs a returned code), anchor on the shortest stable core of the message, and
+  keep a row per observed spelling. Punctuation is not stable across those
+  layers; the words are.
+
 - [2026-09-20] **Smart App Control blocked `.venv/Scripts/python.exe` itself**,
   for a whole session, and it never cleared (three retries over ~20 minutes).
   This is a larger blast radius than the 17 and 18 Sep notes: not a `.pyd` or a
@@ -571,3 +797,6 @@ any iteration approach — if it conflicts with a HANDOFF, prefer the lab note a
   user's bug is not evidence the bug isn't real — it narrows the cause, which
   here moved it from "silence" to "a real sound that clears the VAD", and that
   is what decided the design. State the negative result as a result.
+- [2026-09-08] A warmup step ran the model with `vad_filter=False` while production runs with it on. CUDA kernels were built and the model was resident, so warmup "worked" - but the VAD is a SEPARATE ONNX session with its own first-call cost, so the first real dictation of every session paid 644ms against a 230ms median. Invisible to every gate, because the thing being warmed and the thing being measured were different code paths. -> Any warmup, preload, prefetch or cache-priming step must execute the exact call production executes, flags included; route it through the same function rather than reimplementing a convenient approximation of it. Second lesson from the same session, same shape of invisibility: never name an attribute `_stop` on a `threading.Thread` subclass - it shadows `Thread._stop()`, which `join()` calls internally, and shutdown dies with `TypeError: 'Event' object is not callable` only when something finally joins. Before naming private state on any framework base class, check what the parent already owns.
+- [2026-09-08] A probe reported `state=pending_latch` and I nearly rewrote correct code - the gesture machine was legitimately waiting out a 350ms double-tap window and the probe had only run for 300ms. The assertion was wrong, not the system. Related in the same run: a harness detail string announced "resampled from 44100Hz" when PortAudio had actually accepted 16kHz directly, i.e. it reported the path it ASSUMED rather than the path it TOOK. -> When a harness fails, diagnose before patching the subject, and prefer assertions about the property that matters ("it resolves with no further input") over a snapshot of internal state at an arbitrary instant, which is timing-coupled to the harness's own sleeps. And make every harness print the branch actually taken, measured from the object under test - a confident wrong label in green output gets believed for sessions.
+- [2026-09-08] Wrote a gate asserting "every note is in tune" that compared the measured pitch against the same helper the synth builds from (`notes()`). A deliberate 20% detune inside that helper slipped past all 26 assertions — the expectation moved with the bug. Two rows anchored on the values the CONFIG declares (the voice's root, the gesture's ratio) caught it instantly. This is the 2026-08-26 "don't restate the constant you are checking" rule one level up: it is not enough to avoid retyping the number, the check must not READ it from the code path under test either. Ask of every assertion: if the thing I am testing were wrong, where would my expected value come from? If the answer is "the same function", the check is decorative. Second, cheaper lesson from the same session: a multi-replacement patch script must `assert s != before` PER replacement — one of five silently no-op'd on a typo in its `old` text and I only found it by reading the file back, and a single assert at the end would have passed on the other four.

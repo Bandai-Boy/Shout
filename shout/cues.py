@@ -31,8 +31,10 @@ and fires immediately.
 *That stream is opened on the MME Sound Mapper, not on `device=None`.* A stream
 held open for the life of the process has to follow the Windows default output
 when it changes, and a stream already open on PortAudio's None never moves.
-Windows re-routes a stream on the Mapper live, with nothing to poll — see
-`shout.devices`.
+Windows re-routes a stream on the Mapper live when the default is switched.
+Something still left one playing nowhere on 16 Sep 2026, cause unknown, so a
+watcher thread also reopens it when the default output changes or the stream
+stops calling back — see `shout.devices`.
 
 *Played before the microphone opens — which is not the real defence.* With
 `preroll_ms = 0` the mic opens on chord-down, so a cue played at the same instant
@@ -62,13 +64,14 @@ from dataclasses import dataclass, replace
 import numpy as np
 import sounddevice as sd
 
-from .devices import follow_default
+from .devices import default_output, follow_default
 
 log = logging.getLogger(__name__)
 
 FALLBACK_RATE = 48000
 FADE_S = 0.005          # 5ms; shorter than this and the edge clicks
 MAX_GESTURE_S = 0.40    # a cue longer than this is not a blip any more
+WATCH_S = 0.5           # how often the watcher looks at the output
 
 # Gesture -> (frequency ratio against the root, duration in ms at length 1.0).
 # Ratios, not frequencies: the voice's root transposes all three together and
@@ -216,8 +219,13 @@ class Cues:
         self._cursor: tuple[np.ndarray | None, int] = (None, 0)
         self.samples: dict[str, np.ndarray] = {}
         self._lock = threading.Lock()
+        self._calls = 0
+        self._halt = threading.Event()
         if enabled:
+            self._output = default_output()
             self._open()
+            threading.Thread(target=self._watch, name="cue-output-watch",
+                             daemon=True).start()
 
     # -- device ------------------------------------------------------------
 
@@ -240,6 +248,7 @@ class Cues:
                 )
                 self._stream.start()
                 self._channels = channels
+                self.enabled = True
                 log.info("cues ready on %r at %dHz, %d channel(s), voice %r "
                          "(root=%.0fHz decay=%.2f bright=%.2f length=%.2f)",
                          where, self.rate, channels, self.voice.name,
@@ -248,8 +257,40 @@ class Cues:
                 return
             except Exception:
                 self._stream = None
-        log.warning("no audio output for cues; running silent", exc_info=True)
+        if self.enabled:
+            log.warning("no audio output for cues; running silent", exc_info=True)
         self.enabled = False
+
+    def _watch(self) -> None:
+        """Reopen the stream when the default output changes (only when
+        following it), when the stream has stopped, or when its callback has
+        not run for a whole tick. A reopen costs ~100ms; a cue fired during it
+        is skipped, not delayed. A failed reopen retries every tick, logging
+        only the first failure."""
+        seen = -1
+        while not self._halt.wait(WATCH_S):
+            output = default_output()
+            stream, calls = self._stream, self._calls
+            if self.device is None and output != self._output:
+                reason = f"default output is now {output[1]!r}"
+            elif stream is None:
+                reason = ""
+            elif not stream.active:
+                reason = "the stream stopped"
+            elif calls == seen:
+                reason = "the stream stalled"
+            else:
+                seen = calls
+                continue
+            with self._lock:
+                if self._halt.is_set():
+                    return
+                if reason:
+                    log.info("cues: %s; reopening", reason)
+                self._output = output
+                self._close_stream()
+                self._open()
+            seen = -1
 
     def _render(self) -> None:
         self.samples = {name: build(name, self.rate, self._volume, self.voice)
@@ -272,6 +313,7 @@ class Cues:
     # -- playback ----------------------------------------------------------
 
     def _callback(self, outdata, frames, time_info, status) -> None:
+        self._calls += 1
         samples, pos = self._cursor
         if samples is None or pos >= len(samples):
             outdata[:] = 0.0
@@ -297,11 +339,17 @@ class Cues:
         return len(samples) / self.rate if samples is not None else 0.0
 
     def close(self) -> None:
+        self._halt.set()
         with self._lock:
-            stream, self._stream = self._stream, None
+            self._close_stream()
+
+    def _close_stream(self) -> None:
+        """Abort rather than stop: stop waits for queued buffers to play out,
+        which a stream on a device that has gone away may never do."""
+        stream, self._stream = self._stream, None
         if stream is not None:
             try:
-                stream.stop()
+                stream.abort()
                 stream.close()
             except Exception:
                 log.debug("closing the cue stream", exc_info=True)

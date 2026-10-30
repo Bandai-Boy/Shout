@@ -23,6 +23,7 @@ from shout.overlay import (BARS, COLLAPSED_H, COLLAPSED_W, HEIGHT, WIN_H,  # noq
 OUT = ROOT / "assets" / "pill-states.png"
 SCALE = 2                      # rendered at 2x so it stays crisp on high-DPI screens
 PAD_X, PAD_TOP, CAPTION_H, GAP = 28, 26, 30, 10
+INSET = 10                     # room around each pill; the window has no margin of its own
 
 STATES = [
     ("idle", "Idle: a sliver above the taskbar"),
@@ -56,7 +57,7 @@ def main() -> int:
     ov.widget = PillWidget(ov)                 # never shown
 
     cols, rows = 2, 2
-    cell_w, cell_h = WIN_W + GAP, WIN_H + CAPTION_H
+    cell_w, cell_h = WIN_W + 2 * INSET + GAP, WIN_H + 2 * INSET + CAPTION_H
     w = PAD_X * 2 + cols * cell_w - GAP
     h = PAD_TOP + rows * cell_h + 14
     img = QtGui.QImage(w * SCALE, h * SCALE, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
@@ -76,11 +77,11 @@ def main() -> int:
         x = PAD_X + (i % cols) * cell_w
         y = PAD_TOP + (i // cols) * cell_h
         pose(ov, state)
-        ov.widget.render(p, QtCore.QPoint(x, y), QtGui.QRegion(),
+        ov.widget.render(p, QtCore.QPoint(x + INSET, y + INSET), QtGui.QRegion(),
                          QtWidgets.QWidget.RenderFlag.DrawChildren)
         p.setFont(font)
         p.setPen(QtGui.QColor(255, 255, 255, 225))
-        p.drawText(QtCore.QRectF(x, y + WIN_H - 4, WIN_W, CAPTION_H),
+        p.drawText(QtCore.QRectF(x, y + 2 * INSET + WIN_H - 4, WIN_W + 2 * INSET, CAPTION_H),
                    int(QtCore.Qt.AlignmentFlag.AlignHCenter
                        | QtCore.Qt.AlignmentFlag.AlignTop), caption)
     p.end()

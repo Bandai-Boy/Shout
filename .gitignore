@@ -20,6 +20,10 @@ __pycache__/
 # --- scratch --------------------------------------------------------------
 scratch_*.log
 *.log
+# Throwaway design tools and their output. Kept in the tree rather than in a
+# temp directory so they survive a session, and ignored because they are
+# working notes, not the product.
+scratch/
 
 # --- session state --------------------------------------------------------
 # HANDOFF.md bridges one Claude Code session to the next and is rewritten

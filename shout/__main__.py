@@ -30,12 +30,14 @@ from logging.handlers import RotatingFileHandler
 
 from PySide6 import QtCore, QtWidgets
 
+from . import instance
 from .audio import Recorder
-from .config import Config, config_dir
+from .config import Config, config_dir, merge
 from .cues import Cues, Voice
 from .gestures import Command, Gestures, State
 from .hotkey import HotkeyListener
 from .inject import set_clipboard_text
+from .orb import Tune
 from .overlay import Overlay
 from .recent import Recent
 from .tray import Tray
@@ -46,8 +48,16 @@ log = logging.getLogger("shout")
 
 SAMPLE_RATE = 16000
 MIN_AUDIO_S = 0.25
-MUTEX_NAME = "Global\\ShoutDictationSingleInstance"
 CONFIG_POLL_MS = 500
+# Windows' own wording of ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION (4551), which
+# every "Application Control policy has blocked this file" variant starts with.
+# Localized, like the messages it is matched against. The trailing period goes:
+# ctypes keeps the one FormatMessage returns, and CPython strips it when it
+# builds an OSError, so an unstripped constant misses the OSError form -- which
+# is what ctypes.CDLL raises, and is how the block reached Gabe on 18 Sep.
+BLOCKED_BY_WINDOWS = ctypes.FormatError(4551).rstrip(" .")
+# Seconds between model-load attempts while Windows blocks a file: 5 minutes.
+BLOCK_RETRY_S = (10, 20, 30, 60, 60, 60, 60)
 
 
 def _setup_logging(level: str) -> None:
@@ -63,10 +73,16 @@ def _setup_logging(level: str) -> None:
     root.handlers = [fh, sh]
 
 
-def _claim_single_instance() -> bool:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+def _forget_imports_since(before: set[str]) -> None:
+    """Drop the pure-Python modules a failed import left behind, so the retry
+    runs them again. Left in place, a package re-run on retry finds its
+    submodules cached and never binds them to itself: asyncio then dies on
+    `base_events` not defined. Compiled modules stay, because Cython refuses to
+    initialise one twice."""
+    for name in set(sys.modules) - before:
+        path = getattr(sys.modules.get(name), "__file__", None) or ""
+        if path.endswith((".py", ".pyc")):
+            sys.modules.pop(name, None)
 
 
 class Shout:
@@ -87,9 +103,16 @@ class Shout:
         self.watchdog = Watchdog(self.gestures, self.hotkey, self._dispatch)
         self.recent = Recent()
         self.window: Window | None = None
-        self.tray = Tray(self._quit, self.open_window, self.copy_last)
         self.overlay = Overlay(enabled=cfg.overlay,
-                               level_source=lambda: self.recorder.level)
+                               level_source=lambda: self.recorder.level,
+                               style=cfg.overlay_style,
+                               orb_tune=Tune.resolve(cfg.orb_tune))
+        # The look config.json last asked for, which the overlay may not be
+        # showing if the orb could not start. Compared against the file, so a
+        # fallback is not retried on every poll.
+        self._style_setting = cfg.overlay_style
+        self.tray = Tray(self._quit, self.open_window, self.copy_last,
+                         self.set_overlay_style, self.overlay.style)
         self.commits = ThreadPoolExecutor(max_workers=1, thread_name_prefix="commit")
         self.ready = threading.Event()
         self.transcriber = None
@@ -100,30 +123,53 @@ class Shout:
         # seen twice and blip twice.
         self._state_lock = threading.Lock()
         self._last_gesture = State.IDLE
+        # Clips committed and not yet through _finish, under the same lock. The
+        # watchdog republishes the state every 20ms, so "working" has to come
+        # from here: set once from _finish, it lasted a single tick.
+        self._commits_pending = 0
 
     # -- model -------------------------------------------------------------
 
     def _load_model(self) -> None:
+        """Smart App Control blocks an unsigned .pyd it cannot get a reputation
+        for, which happens at boot while Defender is still updating (17 Sep:
+        av/video/stream.pyd, fine again three minutes later). So a block is
+        retried rather than reported; any other failure is reported at once."""
         t0 = time.perf_counter()
-        try:
-            from .transcribe import Transcriber  # imported late: pulls in CUDA
-            self.transcriber = Transcriber(self.cfg)
-            self.transcriber.load()
-            self.transcriber.warmup()
+        for delay in (*BLOCK_RETRY_S, None):
+            before = set(sys.modules)
+            try:
+                from .transcribe import Transcriber  # imported late: pulls in CUDA
+                self.transcriber = Transcriber(self.cfg)
+                self.transcriber.load()
+                self.transcriber.warmup()
+            except FileNotFoundError:
+                # huggingface_hub's LocalEntryNotFoundError: the model was never
+                # downloaded. Shout runs offline and cannot fetch it, so say how to.
+                log.exception("speech model is not downloaded")
+                self._set_state("error")
+                self.tray.notify("Speech model not downloaded. Run scripts\\install.ps1 "
+                                 "(see the README).")
+                return
+            except Exception as e:
+                blocked = BLOCKED_BY_WINDOWS in str(e)
+                if blocked and delay is not None:
+                    log.warning("Windows blocked a file the model needs (%s); "
+                                "retrying in %ds", e, delay)
+                    _forget_imports_since(before)
+                    time.sleep(delay)
+                    if self._stopping:
+                        return
+                    continue
+                log.exception("model failed to load")
+                self._set_state("error")
+                self.tray.notify("Windows blocked a file Shout needs — see shout.log"
+                                 if blocked else "Model failed to load — see shout.log")
+                return
             self.ready.set()
             self._publish_state()
             log.info("READY in %.2fs from launch", time.perf_counter() - t0)
-        except FileNotFoundError:
-            # huggingface_hub's LocalEntryNotFoundError: the model was never
-            # downloaded. Shout runs offline and cannot fetch it, so say how to.
-            log.exception("speech model is not downloaded")
-            self._set_state("error")
-            self.tray.notify("Speech model not downloaded. Run scripts\\install.ps1 "
-                             "(see the README).")
-        except Exception:
-            log.exception("model failed to load")
-            self._set_state("error")
-            self.tray.notify("Model failed to load — see shout.log")
+            return
 
     # -- gesture plumbing ---------------------------------------------------
 
@@ -149,6 +195,11 @@ class Shout:
             return "latched"
         if self.gestures.capturing:
             return "recording"
+        # A clip still transcribing, including one waiting on a model that is
+        # still loading. A clip started meanwhile is the one you are speaking
+        # into, so capture wins here too.
+        if self._commits_pending:
+            return "working"
         if not self.ready.is_set():
             return "loading"
         return "idle"
@@ -192,15 +243,16 @@ class Shout:
             if seconds < MIN_AUDIO_S:
                 log.info("ignoring %.2fs clip (held %.2fs)", seconds, held)
                 return
-            self.commits.submit(self._finish, audio, time.perf_counter())
+            self._queue_commit(audio)
 
     # -- config ------------------------------------------------------------
 
     def watch_config(self) -> None:
         """Follow the cue settings in config.json while running, so a voice saved
         in the cue lab plays from the next chord rather than the next launch.
-        Only the cue keys: the rest of the file (the model, the mic mode) cannot
-        change under a live process without a restart anyway."""
+        Only the cue keys and the overlay's look and orb tune: the rest of the
+        file (the model, the mic mode) cannot change under a live process
+        without a restart anyway."""
         self._config_timer = QtCore.QTimer()
         self._config_timer.timeout.connect(self._follow_config)
         self._config_timer.start(CONFIG_POLL_MS)
@@ -222,7 +274,16 @@ class Shout:
             return
         first_look = self._config_stamp is None
         self._config_stamp = stamp
-        settings = (Voice.resolve(cfg.cue_preset, cfg.cue_voice, cfg.cue_presets),
+        if cfg.overlay_style != self._style_setting:
+            self._style_setting = cfg.overlay_style
+            self.overlay.set_style(cfg.overlay_style)
+            self.tray.show_style(self.overlay.style)
+            log.info("config.json changed; overlay is %s", self.overlay.style)
+        tune = Tune.resolve(cfg.orb_tune)
+        if tune != self.overlay.orb_tune:
+            self.overlay.set_orb_tune(tune)
+            log.info("config.json changed; the orb follows its new tune")
+        settings =(Voice.resolve(cfg.cue_preset, cfg.cue_voice, cfg.cue_presets),
                     float(cfg.cue_volume))
         if settings != self._cue_settings:
             self._cue_settings = settings
@@ -235,14 +296,20 @@ class Shout:
 
     # -- transcribe + inject ------------------------------------------------
 
+    def _queue_commit(self, audio) -> None:
+        """The only way a clip reaches _finish, so every count taken here is
+        released exactly once, in its finally."""
+        with self._state_lock:
+            self._commits_pending += 1
+        self.commits.submit(self._finish, audio, time.perf_counter())
+
     def _finish(self, audio, t_commit: float) -> None:
         from .inject import inject
 
-        self._set_state("working")
-        if not self.ready.wait(timeout=60):
-            self.tray.notify("Model is still loading — clip dropped")
-            return
         try:
+            if not self.ready.wait(timeout=60):
+                self.tray.notify("Model is still loading — clip dropped")
+                return
             text = self.transcriber.transcribe(audio)
             if not text:
                 log.info("empty transcript, nothing to inject")
@@ -262,6 +329,8 @@ class Shout:
             log.exception("commit failed")
             self.tray.notify("Transcription failed — see shout.log")
         finally:
+            with self._state_lock:
+                self._commits_pending -= 1
             self._publish_state()
 
     # -- the window and the recent list --------------------------------------
@@ -281,6 +350,17 @@ class Shout:
             self.window.show()
         self.window.raise_()
         self.window.activateWindow()
+
+    def set_overlay_style(self, style: str) -> None:
+        """GUI thread, from the tray's Appearance menu. Applied here rather than
+        left to the config poll, so the switch is immediate."""
+        self._style_setting = style
+        self.overlay.set_style(style)
+        self.tray.show_style(self.overlay.style)
+        try:
+            merge({"overlay_style": style})
+        except OSError:
+            log.exception("could not save the overlay style")
 
     def copy_last(self) -> None:
         """GUI thread, from a left click on the tray icon: the way back to a
@@ -309,6 +389,7 @@ class Shout:
         self.hotkey.start()
         self.watchdog.start()
         log.info("hold Ctrl+Win to dictate; double-tap to latch hands-free")
+        beat = instance.start_beating()  # noqa: F841 -- kept alive for exec()
         app.exec()           # blocks: Qt owns the main thread until quit
         # Only now is it safe to touch the widgets, whichever thread asked to quit.
         if self.window is not None:
@@ -339,7 +420,7 @@ class Shout:
 def main() -> int:
     cfg = Config.load()
     _setup_logging(cfg.log_level)
-    if not _claim_single_instance():
+    if not instance.claim():
         log.error("Shout is already running")
         return 1
     app = application(sys.argv)

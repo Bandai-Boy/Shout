@@ -28,6 +28,11 @@ Per-pixel alpha is what makes this look like a designed object rather than a
 chroma-keyed rectangle: Tk's `-transparentcolor` is an exact-match colour test,
 so every rounded corner was stair-stepped and a soft shadow was impossible.
 
+Two looks share everything here but the painting: the pill, and the orb from
+`shout.orb`, picked by `overlay_style` in config.json and swappable while
+running. Placement, visibility, fullscreen hiding and keep-on-top belong to
+`Overlay` and do not know which one is on screen.
+
 Threading: Qt owns the main thread and nothing outside this module touches a
 widget. `set_state()` and `set_level()` are attribute rebinds, atomic under the
 GIL, and a timer on the GUI thread reads them — the same discipline the Tk
@@ -44,6 +49,8 @@ import time
 from ctypes import wintypes
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from . import orb
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +163,8 @@ def _describe(h: int) -> str:
 
 # -- geometry ----------------------------------------------------------------
 
+STYLES = ("pill", "orb")
+
 HEIGHT = 31
 # The idle pill is its own shape, not a narrower expanded one: it is on screen
 # all day, so it should be a sliver, while the states you actually look at keep
@@ -165,7 +174,6 @@ COLLAPSED_W = 52
 COLLAPSED_H = 10
 IDLE_DOT_R = 0.0        # 0 = the idle pill carries no dot at all
 MARGIN_Y = 14           # gap between the pill and the top of the taskbar
-SHADOW = 10             # painted margin around the pill for the drop shadow
 
 # Expanded width is DERIVED per state rather than being one constant, because
 # the states carry different amounts of text and a width sized for the longest
@@ -184,8 +192,8 @@ MAX_PILL_W = 268.0      # window capacity; derived widths are clamped to it
 # The window is always the largest it can get, so it never resizes while
 # animating — only what is painted inside it changes. Resizing a layered
 # top-level 60 times a second is visibly janky and makes placement race.
-WIN_W = int(MAX_PILL_W) + SHADOW * 2
-WIN_H = HEIGHT + SHADOW * 2
+WIN_W = int(MAX_PILL_W)
+WIN_H = HEIGHT
 
 FRAME_MS = 16           # 60Hz while anything is moving
 # Once settled the tick does almost nothing — the repaint is gated behind a
@@ -199,8 +207,8 @@ IDLE_FRAME_MS = 33
 # Noir: every neutral here is exactly R == G == B. The body used to be
 # (20, 20, 26) with a steel-blue idle dot, which read as a blue pill; the state
 # colours below are the only hue left, so they are the only thing that speaks.
-BG = QtGui.QColor(0, 0, 0, 236)
-BORDER = QtGui.QColor(255, 255, 255, 26)
+BG = QtGui.QColor(0, 0, 0, 191)         # 75% opaque
+BORDER = QtGui.QColor(255, 255, 255, 115)  # 45% white
 TEXT = QtGui.QColor(255, 255, 255)
 TEXT_DIM = QtGui.QColor(255, 255, 255, 130)
 METER_BG = QtGui.QColor(255, 255, 255, 28)
@@ -353,10 +361,14 @@ def fullscreen_state() -> tuple[bool, set[int]]:
     return state in EVERYWHERE_STATES, on
 
 
-class PillWidget(QtWidgets.QWidget):
-    """Paints the pill. Owns no state of its own beyond what it is told to draw."""
+class OverlayWindow(QtWidgets.QWidget):
+    """The window both looks draw in: frameless, topmost, click-through, and
+    never activated. The flags live here once so the two cannot drift apart."""
 
-    def __init__(self, overlay: "Overlay") -> None:
+    # How far the window hangs below the line its shape's bottom sits on.
+    BOTTOM_PAD = 0
+
+    def __init__(self, overlay: "Overlay", width: int, height: int) -> None:
         super().__init__(None)
         self._ov = overlay
         self.setWindowFlags(
@@ -368,7 +380,28 @@ class PillWidget(QtWidgets.QWidget):
         )
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setFixedSize(WIN_W, WIN_H)
+        self.setFixedSize(width, height)
+
+    def advance(self, dt: float) -> bool:
+        """Move any motion of its own on by dt seconds; True if it moved."""
+        return False
+
+    def resting(self) -> bool:
+        """Still moving, but slowly enough to draw at the idle tick."""
+        return False
+
+    def prepare(self) -> None:
+        """Get the next frame ready before a repaint is requested."""
+
+    def close_look(self) -> None:
+        """Release anything held beyond the widget itself."""
+
+
+class PillWidget(OverlayWindow):
+    """Paints the pill. Owns no state of its own beyond what it is told to draw."""
+
+    def __init__(self, overlay: "Overlay") -> None:
+        super().__init__(overlay, WIN_W, WIN_H)
         self._font = QtGui.QFont("Segoe UI", 9)
         self._font.setWeight(QtGui.QFont.Weight.Medium)
         fm = QtGui.QFontMetricsF(self._font)
@@ -390,18 +423,9 @@ class PillWidget(QtWidgets.QWidget):
         width = ov.pill_width
         height = ov.pill_height
         x = (WIN_W - width) / 2.0
-        y = float(SHADOW + HEIGHT) - height     # bottom edge never moves
+        y = float(HEIGHT) - height              # bottom edge never moves
         r = height / 2.0
         body = QtCore.QRectF(x, y, width, height)
-
-        # Soft shadow: a few progressively larger, fainter rounded rects. Cheaper
-        # per frame than a QGraphicsDropShadowEffect, which re-renders the widget
-        # into an offscreen buffer on every repaint.
-        for i in range(SHADOW, 0, -2):
-            p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.setBrush(QtGui.QColor(0, 0, 0, 6))
-            p.drawRoundedRect(body.adjusted(-i, -i * 0.6, i, i * 0.6),
-                              r + i, r + i * 0.6)
 
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         p.setBrush(BG)
@@ -409,6 +433,7 @@ class PillWidget(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(BORDER, 1.0))
         p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), r, r)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)     # or the dot and halo get a white ring
 
         accent = ACCENT.get(ov.state, ACCENT["idle"])
         cy = y + height / 2.0
@@ -510,12 +535,57 @@ class PillWidget(QtWidgets.QWidget):
                               w / 2.0, w / 2.0)
 
 
+class OrbWidget(OverlayWindow):
+    """Paints the orb. The frame is rendered in prepare(), from the overlay's
+    tick, not in paintEvent: a lost OpenGL context then raises where the overlay
+    can catch it and fall back to the pill, instead of inside Qt's paint."""
+
+    def __init__(self, overlay: "Overlay") -> None:
+        tune = overlay.orb_tune
+        # Sized from the tune, so the loudest orb it can draw is never cut off.
+        super().__init__(overlay, tune.win, tune.win)
+        self.BOTTOM_PAD = tune.bottom_pad
+        self.renderer = orb.Renderer()          # raises if OpenGL is unavailable
+        self.motion = orb.Choreography(tune)
+        self._frame: QtGui.QImage | None = None
+
+    def advance(self, dt: float) -> bool:
+        ov = self._ov
+        return self.motion.step(dt, ov.state, ov.meter)
+
+    def resting(self) -> bool:
+        return self._ov.expand == 0.0 and self.motion.resting()
+
+    def prepare(self) -> None:
+        dpr = self.devicePixelRatioF()
+        scale = dpr * orb.SUPERSAMPLE
+        image = self.renderer.render(self.motion.uniforms(_ease(self._ov.expand), dpr),
+                                     round(self.width() * scale))
+        image.setDevicePixelRatio(scale)
+        self._frame = image
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        if self._frame is None:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.drawImage(QtCore.QPointF(0.0, 0.0), self._frame)
+        p.end()
+
+    def close_look(self) -> None:
+        self.renderer.close()
+
+
 class Overlay:
     """Public surface. Everything outside this module talks to it by attribute."""
 
-    def __init__(self, enabled: bool = True, level_source=None) -> None:
+    def __init__(self, enabled: bool = True, level_source=None, style: str = "pill",
+                 orb_tune: orb.Tune | None = None) -> None:
         self.enabled = enabled
         self._level_source = level_source
+        self.style = style if style in STYLES else "pill"
+        self.orb_tune = orb_tune or orb.Tune()
+        self._last_tick = time.perf_counter()
         self._state = "loading"       # written by any thread
         self._level = 0.0             # written by the audio callback
         self.state = "loading"        # GUI-thread copy, read by the painter
@@ -529,7 +599,7 @@ class Overlay:
         self._expanded_w = 0.0
         self.history: collections.deque[float] = collections.deque(
             [0.0] * BARS, maxlen=BARS)
-        self.widget: PillWidget | None = None
+        self.widget: OverlayWindow | None = None
         self._timer: QtCore.QTimer | None = None
         self._hwnd = 0
         self._placed: tuple[int, int] | None = None
@@ -555,16 +625,63 @@ class Overlay:
     def build(self) -> None:
         if not self.enabled:
             return
-        self.widget = PillWidget(self)
+        self._make_widget()
+        self._timer = QtCore.QTimer()
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(FRAME_MS)
+        log.info("overlay ready (%s, hwnd=%d)", self.style, self._hwnd)
+
+    def _make_widget(self) -> None:
+        if self.style == "orb":
+            try:
+                self.widget = OrbWidget(self)
+            except Exception:
+                log.exception("the orb could not start; drawing the pill instead")
+                self.style = "pill"
+        if self.style == "pill":
+            self.widget = PillWidget(self)
         # winId() realises the window. Measured: for a Qt top-level this IS the
         # top-level hwnd, so no GetAncestor walk is needed the way Tk required.
         self._hwnd = int(self.widget.winId())
         self._enforce_exstyle()
+        self._shown = False
+        self._dirty = True
         self._reposition(force=True)
-        self._timer = QtCore.QTimer()
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(FRAME_MS)
-        log.info("overlay ready (hwnd=%d)", self._hwnd)
+
+    def set_style(self, style: str) -> None:
+        """GUI thread only. Swaps in the other look without a restart; the new
+        window shows on the next tick if the state calls for it."""
+        style = style if style in STYLES else "pill"
+        if style == self.style:
+            return
+        self.style = style
+        if self.widget is None:
+            return
+        old = self.widget
+        self._make_widget()
+        self._retire(old)
+        log.info("overlay style is now %s", self.style)
+
+    def set_orb_tune(self, tune: orb.Tune) -> None:
+        """GUI thread only. The orb takes a new tune in place when its window
+        is still the right size, and is rebuilt in a window of the new size
+        when it is not."""
+        self.orb_tune = tune
+        widget = self.widget
+        if not isinstance(widget, OrbWidget):
+            return
+        if widget.width() == tune.win and widget.BOTTOM_PAD == tune.bottom_pad:
+            widget.motion.tune = tune
+            self._dirty = True
+            return
+        self._make_widget()
+        self._retire(widget)
+        log.info("orb window is now %dpx for the new tune", tune.win)
+
+    def _retire(self, widget: OverlayWindow) -> None:
+        widget.hide()
+        widget.close_look()
+        widget.deleteLater()
 
     def _enforce_exstyle(self) -> None:
         """Qt's flags already produce all three bits — measured before this was
@@ -651,8 +768,9 @@ class Overlay:
 
     def _reposition(self, force: bool = False) -> None:
         a = self.work_area()
-        x = a.left() + (a.width() - WIN_W) // 2
-        y = a.top() + a.height() - WIN_H - MARGIN_Y + SHADOW
+        w = self.widget
+        x = a.left() + (a.width() - w.width()) // 2
+        y = a.top() + a.height() - MARGIN_Y - (w.height() - w.BOTTOM_PAD)
         if not force and (x, y) == self._placed:
             return
         self.widget.move(x, y)
@@ -680,6 +798,10 @@ class Overlay:
 
     def _update(self) -> None:
         now = time.perf_counter()
+        # Capped, so a stall (a sleeping machine, a debugger) does not fling
+        # the orb's motion forward by however long it lasted.
+        dt = min(now - self._last_tick, 0.1)
+        self._last_tick = now
         if now - self._last_fullscreen_check > 0.5:
             self._last_fullscreen_check = now
             self._fullscreen_everywhere, self._fullscreen_on = fullscreen_state()
@@ -755,22 +877,34 @@ class Overlay:
             self.history.extend([0.0] * BARS)
             self._dirty = True
 
+        # The orb moves on its own in every state, even at rest, where its rim
+        # circles slowly enough for the idle tick.
+        moving = self.widget.advance(dt)
+        if moving:
+            self._dirty = True
+
         # Repaint only when something moved. A persistent overlay that repaints
         # 60 times a second while idle is a background CPU cost for the whole
         # time the machine is on, which is most of why the pill was hidden before.
         if self._dirty and self._shown:
+            try:
+                self.widget.prepare()
+            except Exception:
+                log.exception("the orb stopped rendering; drawing the pill instead")
+                self.set_style("pill")
+                return
             self.widget.update()
             self._dirty = False
-        settled = (not self._dirty and self.expand in (0.0, 1.0)
+        settled = (not self._dirty and not moving and self.expand in (0.0, 1.0)
                    and state not in METERED_STATES and state != "working")
-        want_interval = IDLE_FRAME_MS if settled else FRAME_MS
+        want_interval = IDLE_FRAME_MS if settled or self.widget.resting() else FRAME_MS
         if self._timer.interval() != want_interval:
             self._timer.setInterval(want_interval)
 
     def expanded_width_for(self, state: str) -> float:
         """Width this state expands to. The widget owns it because only it has
         the font, and the label's measured advance is what sets the width."""
-        if self.widget is not None:
+        if isinstance(self.widget, PillWidget):
             return self.widget.width_for(state)
         return expanded_width(state, 0.0)
 
@@ -798,6 +932,5 @@ class Overlay:
         if self._timer is not None:
             self._timer.stop()
         if self.widget is not None:
-            self.widget.hide()
-            self.widget.deleteLater()
+            self._retire(self.widget)
             self._shown = False

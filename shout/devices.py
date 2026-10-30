@@ -22,14 +22,47 @@ the index PortAudio labels "headphones" can open the speakers.
 
 PortAudio lists the Mapper as the first MME device of each direction. It is found
 by position rather than by name, because the name is localized.
+
+Following the default is not the whole story. On 16 Sep 2026 Shout's held cue
+stream ended up playing nowhere (no session for the process on any endpoint) for
+the rest of the process, and the cause was never found. Each of these left a stream playing: a
+default switch, disabling the endpoint the stream is on, a PS4 controller's USB
+audio arriving and leaving (`harness/probe_hotplug.py`), and a second stream
+opened and closed in the same process. So `shout.cues` also watches: it reopens
+when `default_output()` changes, or when the stream stops or stalls. Whether
+that failure stopped the callbacks is unknown, so the watcher is not proven
+against it.
 """
 from __future__ import annotations
 
+import ctypes
 import logging
+from ctypes import wintypes
 
 import sounddevice as sd
 
 log = logging.getLogger(__name__)
+
+_winmm = ctypes.WinDLL("winmm")
+
+
+class _WAVEOUTCAPSW(ctypes.Structure):
+    _fields_ = [("wMid", wintypes.WORD), ("wPid", wintypes.WORD),
+                ("vDriverVersion", wintypes.UINT), ("szPname", wintypes.WCHAR * 32),
+                ("dwFormats", wintypes.DWORD), ("wChannels", wintypes.WORD),
+                ("wReserved1", wintypes.WORD), ("dwSupport", wintypes.DWORD)]
+
+
+def default_output() -> tuple[int, str]:
+    """(output device count, current default's name), for noticing that the
+    default output or the set of outputs changed. MME device 0 is always the
+    current default, because Windows renumbers. The name is cut at 31
+    characters. About half a millisecond; no COM."""
+    caps = _WAVEOUTCAPSW()
+    count = _winmm.waveOutGetNumDevs()
+    if _winmm.waveOutGetDevCapsW(0, ctypes.byref(caps), ctypes.sizeof(caps)) != 0:
+        return count, ""
+    return count, caps.szPname
 
 
 def follow_default(kind: str) -> int | None:

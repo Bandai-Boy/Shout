@@ -66,12 +66,16 @@ def _icon(state: str) -> QtGui.QIcon:
 
 
 class Tray:
-    def __init__(self, on_quit, on_open, on_click) -> None:
-        """`on_open(page)` shows the Shout window on "recent" or "sounds";
-        `on_click()` is a left click on the icon. Both run on the GUI thread."""
+    def __init__(self, on_quit, on_open, on_click, on_style, style: str) -> None:
+        """`on_open(page)` shows the Shout window on "recent", "sounds" or "orb";
+        `on_click()` is a left click on the icon; `on_style(style)` picks the
+        overlay's look, which starts as `style`. All run on the GUI thread."""
         self._on_quit = on_quit
         self._on_open = on_open
         self._on_click = on_click
+        self._on_style = on_style
+        self._style = style
+        self._style_actions: dict[str, QtGui.QAction] = {}
         self._state = "loading"        # written by any thread
         self._applied = None           # what the icon currently shows
         self._stopped = False
@@ -90,6 +94,14 @@ class Tray:
 
     # -- GUI thread ---------------------------------------------------------
 
+    def show_style(self, style: str) -> None:
+        """Tick the look actually on screen, which is the pill if the orb
+        could not start, whatever config.json asked for."""
+        self._style = style
+        action = self._style_actions.get(style)
+        if action is not None:
+            action.setChecked(True)
+
     def build(self) -> None:
         self.icon = QtWidgets.QSystemTrayIcon(_icon("loading"))
         self.icon.setToolTip(_LABELS["loading"] + CLICK_HINT)
@@ -99,9 +111,19 @@ class Tray:
         # has to be reachable from here. Both entries open the same window, on
         # the page they name.
         for text, page in (("Recent dictations...", "recent"),
-                           ("Cue sounds...", "sounds")):
+                           ("Cue sounds...", "sounds"),
+                           ("Orb look...", "orb")):
             action = menu.addAction(text)
             action.triggered.connect(lambda _checked=False, p=page: self._on_open(p))
+        looks = menu.addMenu("Appearance")
+        group = QtGui.QActionGroup(looks)
+        for text, style in (("Pill", "pill"), ("Orb", "orb")):
+            action = looks.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(style == self._style)
+            group.addAction(action)
+            action.triggered.connect(lambda _checked=False, s=style: self._on_style(s))
+            self._style_actions[style] = action
         menu.addSeparator()
         quit_action = menu.addAction("Quit Shout")
         quit_action.triggered.connect(lambda _checked=False: self._on_quit())
