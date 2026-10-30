@@ -27,6 +27,7 @@ GATES = [
     ("gestures", ROOT / "tests" / "test_gestures.py"),
     ("smoke", ROOT / "harness" / "smoke.py"),
     ("tail", ROOT / "harness" / "probe_tail.py"),
+    ("questions", ROOT / "harness" / "probe_questions.py"),
     ("hook", ROOT / "harness" / "probe_hook.py"),
     ("inject", ROOT / "harness" / "probe_inject.py"),
     ("stuck", ROOT / "harness" / "probe_stuck.py"),

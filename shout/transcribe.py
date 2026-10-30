@@ -16,7 +16,7 @@ import numpy as np
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # unauthenticated Hub calls hang on backoff
 
-from . import cuda_dlls
+from . import cuda_dlls, questions
 
 _CUDA_DIRS = cuda_dlls.enable()
 
@@ -89,6 +89,30 @@ _FUSED = tuple(
 )
 _TRIM = re.compile(r"^[^\w\[\(]+|[^\w\]\)]+$")
 
+# The phrase list cannot catch the commonest outro of all, because "Thank you."
+# and "you" are real words people say. What gives them away is WHERE they come
+# from. A long dictation is decoded in 30-second windows, and when the last real
+# segment ends just short of the clip, the sliver left over (a breath, the chord
+# release) is decoded as a window of its own, holds no words, and comes back as
+# a short phrase decoded with poor confidence. Measured 29 Oct 2026 over 1,736
+# logged dictations: 62 final segments sat alone in a later window at
+# avg_logprob below -0.45 (most -0.6 to -1.1, mostly 10 characters, every one
+# from a clip over 29s), while every short own-window tail at -0.40 or better
+# looked like speech. -0.45 sits in that gap. Ending after the audio ends was
+# tried as a second signal and refuted: 135 real segments overshoot the clip.
+TAIL_MAX_CHARS = 25
+TAIL_MAX_LOGPROB = -0.45
+
+
+def _invented_tail(segs) -> bool:
+    """The last segment is alone in a later decode window, short, and unsure."""
+    if len(segs) < 2:
+        return False                       # nothing real before it to protect
+    last, prev = segs[-1], segs[-2]
+    return (last.seek > prev.seek
+            and len(last.text.strip()) <= TAIL_MAX_CHARS
+            and last.avg_logprob < TAIL_MAX_LOGPROB)
+
 
 def _whole_match(text: str) -> int | None:
     core = _TRIM.sub("", " ".join(text.split()))
@@ -100,15 +124,19 @@ def _whole_match(text: str) -> int | None:
     return None
 
 
-def assemble(segments) -> tuple[str, list[int]]:
+def assemble(segments) -> tuple[str, list[int], bool]:
     """Join the segment texts, dropping invented subtitle boilerplate.
 
-    Returns the text and the indices of the _BOILERPLATE patterns that fired.
-    An index is all the caller may log: it cannot leak a dictation even if this
-    misfires on something real, which keeps README's promise that shout.log
-    never holds your words.
+    Returns the text, the indices of the _BOILERPLATE patterns that fired, and
+    whether an invented final window was dropped. Indices and a flag are all the
+    caller may log: they cannot leak a dictation even if this misfires on
+    something real, which keeps README's promise that shout.log never holds
+    your words.
     """
     kept = list(segments)
+    tail = _invented_tail(kept)
+    if tail:
+        kept.pop()
     dropped: list[int] = []
     while kept:                            # trailing junk can repeat
         idx = _whole_match(kept[-1].text)
@@ -126,7 +154,7 @@ def assemble(segments) -> tuple[str, list[int]]:
                 break
         else:
             break
-    return text, dropped
+    return text, dropped, tail
 
 
 class Transcriber:
@@ -188,7 +216,8 @@ class Transcriber:
             condition_on_previous_text=False,
         )
         segs = list(segments)
-        text, dropped = assemble(segs)
+        text, dropped, tail = assemble(segs)
+        text, asked = questions.punctuate(text)
         # Numbers only, never the words. These are what a confidence-based
         # filter would have to be tuned on, so they are recorded now rather
         # than guessed at later; a hallucinated tail should stand out on
@@ -199,8 +228,13 @@ class Transcriber:
                 f"lp={s.avg_logprob:+.2f} cr={s.compression_ratio:.2f} "
                 f"n={len(s.text.strip())}"
                 for s in segs))
+        if tail:
+            log.info("dropped an invented final window (lp=%+.2f n=%d)",
+                     segs[-1].avg_logprob, len(segs[-1].text.strip()))
         for i in dropped:
             log.info("dropped trailing boilerplate, pattern #%d", i)
+        if asked:
+            log.info("question marks added: %s", ", ".join(asked))
         log.info("transcribed %.1fs of audio in %.2fs -> %d chars",
                  len(audio) / SAMPLE_RATE, time.perf_counter() - t0, len(text))
         return text

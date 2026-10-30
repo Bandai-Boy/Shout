@@ -33,17 +33,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from shout.transcribe import _BOILERPLATE, assemble  # noqa: E402
+from shout.transcribe import _BOILERPLATE, TAIL_MAX_LOGPROB, assemble  # noqa: E402
 
 RSQUO = chr(0x2019)          # curly apostrophe, as Whisper usually emits it
 
 
-def seg(text):
-    return SimpleNamespace(text=text)
+def seg(text, seek=0, lp=-0.15):
+    return SimpleNamespace(text=text, seek=seek, avg_logprob=lp)
 
 
 def segs(*texts):
-    return [seg(t) for t in texts]
+    return [seg(t) for t in texts]           # one window, confident: no tail rule
 
 
 # (label, segments, expected text). Segment texts carry the leading space
@@ -142,14 +142,58 @@ KEEP = [
 ]
 
 
+LONG = " Pull the Charizard, grade the Umbreons and ship the lot on Monday."
+
+# The invented final window: a long dictation's leftover sliver decoded as a
+# window of its own. Shapes and numbers are the ones measured in shout.log on
+# 29 Oct 2026 (seek 2990 is a window starting 29.9s into the trimmed audio).
+TAIL_DROP = [
+    ("thank you, alone in the last window",
+     [seg(LONG), seg(" Thank you.", seek=2990, lp=-0.98)], LONG.strip()),
+    ("you, alone in the last window",
+     [seg(LONG), seg(" you", seek=3158, lp=-0.99)], LONG.strip()),
+    ("just under the confidence line",
+     [seg(LONG), seg(" Thank you.", seek=2990, lp=-0.47)], LONG.strip()),
+    ("then boilerplate in the window before it",
+     [seg(LONG + " Thanks for watching!"), seg(" Thank you.", seek=2990, lp=-0.90)],
+     LONG.strip()),
+]
+
+# Each differs from a TAIL_DROP row in exactly one property, so each passes
+# only because the rule checks that property.
+TAIL_KEEP = [
+    ("a real last word in its own window decodes confidently",
+     [seg(LONG), seg(" Thank you.", seek=2990, lp=-0.30)], (LONG + " Thank you.").strip()),
+    ("the measured edge of real speech, -0.40",
+     [seg(LONG), seg(" Monday.", seek=2990, lp=-0.40)], (LONG + " Monday.").strip()),
+    ("same window as the text before it",
+     [seg(LONG), seg(" Thank you.", seek=0, lp=-0.98)], (LONG + " Thank you.").strip()),
+    ("too long to be an outro",
+     [seg(LONG), seg(" and the two sealed booster boxes.", seek=2990, lp=-0.98)],
+     (LONG + " and the two sealed booster boxes.").strip()),
+    ("nothing before it",
+     [seg(" Thank you.", seek=0, lp=-0.98)], "Thank you."),
+]
+
+
 def main() -> int:
     rows = []
 
     def check(ok, name, detail=""):
         rows.append((bool(ok), name, detail))
 
+    for label, s, want in TAIL_DROP:
+        got, _, tail = assemble(s)
+        check(got == want and tail, f"drops tail: {label}", f"got {got!r} tail={tail}")
+        plain = "".join(x.text for x in s).strip()
+        check(plain != want, f"CONTROL: {label} carries junk before assemble", f"plain={plain!r}")
+    for label, s, want in TAIL_KEEP:
+        got, dropped, tail = assemble(s)
+        check(got == want and not tail and not dropped,
+              f"keeps tail: {label}", f"got {got!r} tail={tail} patterns={dropped}")
+
     for label, s, want in DROP:
-        got, dropped = assemble(s)
+        got, dropped, _ = assemble(s)
         check(got == want and dropped,
               f"drops: {label}", f"got {got!r} want {want!r} patterns={dropped}")
         # Control: the case must actually have carried junk, or the row above
@@ -159,7 +203,7 @@ def main() -> int:
               f"CONTROL: {label} carries junk before assemble", f"plain={plain!r}")
 
     for label, s, want in KEEP:
-        got, dropped = assemble(s)
+        got, dropped, _ = assemble(s)
         check(got == want and not dropped,
               f"keeps: {label}", f"got {got!r} want {want!r} patterns={dropped}")
 
@@ -177,6 +221,10 @@ def main() -> int:
     missing = sorted(set(range(len(_BOILERPLATE))) - fired)
     check(not missing, f"all {len(_BOILERPLATE)} patterns exercised",
           f"never fired: {[_BOILERPLATE[i] for i in missing]}")
+
+    # The tail rule's line is a constant: the rows above pin it from both sides
+    # with their own literals (-0.47 drops, -0.40 keeps), never by reading it.
+    check(-0.47 < TAIL_MAX_LOGPROB < -0.40, f"tail line {TAIL_MAX_LOGPROB} sits in the measured gap", "")
 
     for ok, name, detail in rows:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}" + (f"   {detail}" if not ok and detail else ""))

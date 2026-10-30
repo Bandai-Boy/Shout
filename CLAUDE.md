@@ -130,7 +130,34 @@ than guessed at. Note faster-whisper's own `no_speech_threshold` cannot do this
 job: it is applied per 30-second window, so real speech pulls the window average
 up over a junk tail.
 
-**Re-run `harness/probe_tail.py` after touching `_BOILERPLATE`.** It requires
+**The phrase list never caught the commonest one, "Thank you."**, because it is
+excluded by design. Measured 29 Oct 2026 over 1,736 logged dictations: only 6
+phrase drops fired, all "we'll be right back", while 62 dictations ended in a
+short segment sitting **alone in a later 30-second decode window** at
+`avg_logprob` -0.47 to -1.1 (mostly 10 chars, the length of "Thank you.", every
+one from a clip over 29s). That is the mechanism: when a long dictation's last
+real segment ends just short of the clip, Whisper decodes the leftover sliver as
+a window of its own, and with no words in it, it invents one. `_invented_tail()`
+drops that segment when it is in a later window than the text before it
+(`Segment.seek`), at most 25 chars, and under `TAIL_MAX_LOGPROB` (-0.45). The
+line sits in a gap: every short own-window tail kept is at -0.40 or better. A
+real "Thank you." spoken at the end of a long dictation decodes confidently and
+survives. Refuted as a second signal: "the segment ends after the audio
+does", since 135 real segments overshoot the clip end. Note `lp`/`nsp`/`cr` in
+shout.log are **per window**, not per segment, which is why they repeat across a
+line. The 62 were never labelled against real text (the words are not logged),
+so the drop log line, `dropped an invented final window (lp=… n=…)`, is the
+evidence to re-tune from if a real word ever vanishes.
+
+**Question marks** come from `shout/questions.py`, applied after `assemble()`.
+Whisper punctuates from intonation, so a flat question gets a full stop; this
+reads the wording (inverted auxiliary, wh-word plus verb, a tag such as
+", right", or "can you" after a lead-in clause). "do"/"have"/"don't" count only
+before a personal pronoun, so orders like "Do it now" stay statements. A
+sentence ending in "!", "?" or an ellipsis is never overruled. Gate:
+`harness/probe_questions.py`, mostly near misses.
+
+**Re-run `harness/probe_tail.py` after touching `_BOILERPLATE` or the tail rule.** It requires
 every pattern to be exercised by a case — exact, not a floor, because a floor
 let 8 of 13 patterns ship untested on its first run. It needs no GPU.
 
