@@ -44,6 +44,13 @@ refreshing the page, Copy on an older row copies that row and not the newest,
 a clipped long take still copies whole, the copy is marked private, and the
 list stops at its size. The clipboard it borrows is put back, marked private.
 
+The home page reads today's counts from `shout.log`, so its rows parse a
+synthetic log written into the throwaway APPDATA, with a log dated yesterday as
+the control that must count zero today. Its two ways onward (Add a word, Fix on
+the last dictation) must land on their pages. The settings page must write
+exactly the key each control names and nothing else, and Start with Windows
+must make a shortcut in the throwaway Startup folder that points at shoutw.exe.
+
 The widget is mapped with `WA_DontShowOnScreen`, which runs the real layout
 without ever creating a visible window — this is an ordinary activating window,
 so a plain `show()` would steal focus from whatever is in front. Layout
@@ -60,6 +67,7 @@ import sys
 import tempfile
 import time
 from dataclasses import fields, replace
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -79,9 +87,10 @@ from shout import inject as inj  # noqa: E402
 from shout import orb  # noqa: E402
 from shout import window as ui  # noqa: E402
 from shout.__main__ import CONFIG_POLL_MS, Shout  # noqa: E402
-from shout.config import Config  # noqa: E402
+from shout.config import Config, merge  # noqa: E402
 from shout.cues import PRESETS, Voice  # noqa: E402
 from shout.recent import SIZE, Entry, Recent  # noqa: E402
+from shout.window import RESTART as RESTART_TEXT  # noqa: E402
 
 inj.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
 
@@ -198,6 +207,48 @@ def contrast(fg: str, bg: tuple[float, float, float]) -> float:
     return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
+def parse_colour(token: str) -> tuple[tuple[float, float, float], float]:
+    """A token as (rgb, alpha): '#rrggbb' or 'rgba(r,g,b,a)'."""
+    if token.startswith("#"):
+        c = token.lstrip("#")
+        return tuple(float(int(c[i:i + 2], 16)) for i in (0, 2, 4)), 1.0
+    *rgb, alpha = (float(v) for v in re.findall(r"[\d.]+", token))
+    return tuple(rgb), alpha
+
+
+def over(token: str, bg: tuple[float, float, float]) -> tuple[float, float, float]:
+    rgb, alpha = parse_colour(token)
+    return tuple(alpha * f + (1 - alpha) * b for f, b in zip(rgb, bg))
+
+
+def surfaces(wash: list[str]) -> dict[str, tuple[float, float, float]]:
+    """Every surface text sits on, composited at the wash's LIGHTEST stop,
+    which is where white text is worst off."""
+    C = ui.C
+    base = max((parse_colour(t)[0] for t in wash), key=lambda c: contrast_rgb(
+        (0, 0, 0), c))
+    card = over(C["card"], base)
+    return {"wash": base, "chip on the wash": over(C["inset"], base),
+            "card": card, "inset in a card": over(C["inset"], card),
+            "text field": over(C["field"], card),
+            "hovered inset": over(C["inset_hover"], card),
+            "pressed button": over(C["card"], card),
+            "popup": parse_colour(C["popup"])[0]}
+
+
+def contrast_rgb(a, b) -> float:
+    def chan(v: float) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    def lum(c) -> float:
+        r, g, b_ = (chan(x) for x in c)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b_
+
+    la, lb = lum(a), lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
 def style_checks() -> None:
     """Two things the window's look depends on that no screenshot review catches
     reliably, and one that a screenshot cannot measure at all."""
@@ -215,38 +266,278 @@ def style_checks() -> None:
           f"offenders: {bad}" if bad else "state follows subcontrol throughout")
 
     for selector in ("QComboBox:focus", "QLineEdit:focus", "QPushButton:focus",
-                     "QSlider::handle:horizontal:focus"):
+                     "QPushButton#cta:focus", "QPushButton#nav:focus",
+                     "QPushButton#seg:focus", "QSlider::handle:horizontal:focus"):
         check(selector in QSS, f"{selector} keeps a visible focus ring")
 
-    # Contrast, against every background this window actually composites: the
-    # base, the base under its lightest blob, a translucent card over that, and
-    # the input surface. Light text is worst off over the LIGHTEST of those.
-    def over(fg, alpha, bg):
-        return tuple(alpha * f + (1 - alpha) * b for f, b in zip(fg, bg))
+    # Contrast: every text colour on every surface it is drawn on, read from
+    # the tokens rather than retyped here, so a lighter wash or a stronger fill
+    # fails a row. Placeholder text sits only in text fields, whose hover
+    # changes the border and not the fill.
+    wash = [C["wash_a"], C["wash_b"], C["wash_c"]]
+    tiers = surfaces(wash)
+    used = {"text": list(tiers), "placeholder": ["text field"]}
+    for role, where in used.items():
+        fg = parse_colour(C[role])[0]
+        worst = min(where, key=lambda t: contrast_rgb(fg, tiers[t]))
+        ratio = contrast_rgb(fg, tiers[worst])
+        check(ratio >= 4.5, f"{role} ({C[role]}) clears AA on every surface it is "
+              f"drawn on", f"worst is {worst} at {ratio:.2f}:1")
+    ink = parse_colour(C["ink"])[0]
+    for fill in ("#ffffff", C["white_hover"]):
+        ratio = contrast_rgb(ink, parse_colour(fill)[0])
+        check(ratio >= 4.5, f"dark text on the white button and selected tab "
+              f"({fill}) clears AA", f"{ratio:.2f}:1")
+    # Controls: the same measurement must be able to fail. Faded white is the
+    # disabled colour, and the mock-up's own lighter wash is what these stops
+    # were darkened from.
+    faded = over(C["disabled"], tiers["card"])
+    ratio = contrast_rgb(faded, tiers["card"])
+    check(ratio < 4.5, "and would reject faded white as text (control)",
+          f"{C['disabled']} on a card: {ratio:.2f}:1")
+    mock = surfaces(["#46426c", "#575079", "#6e5068"])
+    ratio = min(contrast_rgb((255, 255, 255), mock[t]) for t in
+                ("inset in a card", "hovered inset"))
+    check(ratio < 4.5, "and the mock-up's lighter wash, which is why the stops "
+          "are darker (control)", f"white on its inset: {ratio:.2f}:1")
+    # Faded white therefore survives only where a contrast floor does not apply.
+    rules = re.findall(r"([^{}]+)\{([^}]*)\}", live)
+    holders = [sel.strip() for sel, body in rules if C["disabled"] in body]
+    check(holders and all(":disabled" in sel for sel in holders),
+          "faded white is used only for disabled controls",
+          f"rules using it: {holders}")
 
-    deep = (0x1a, 0x0f, 0x2e)
-    blob = over((100, 60, 180), 0.20, deep)
-    tiers = {"base": deep, "under blob": blob,
-             "card fill": over((255, 255, 255), 0.06, blob),
-             "input surface": (0x3d, 0x22, 0x66)}
-    for role in ("text", "label", "negative"):
-        worst = min(tiers, key=lambda t: contrast(C[role], tiers[t]))
-        ratio = contrast(C[role], tiers[worst])
-        check(ratio >= 4.5, f"{role} text ({C[role]}) clears AA on every surface",
-              f"worst is {worst} at {ratio:.2f}:1")
-    # Control: the check must be able to fail. VV's own --vv-text-muted is the
-    # token this palette had to reject, so it is the honest negative case.
-    muted = max(contrast("#8a6f5a", bg) for bg in tiers.values())
-    check(muted < 4.5, "and would reject VV's own #8a6f5a muted token (control)",
-          f"best case {muted:.2f}:1, below the 4.5 floor everywhere")
-    check(C["disabled"] == "#8a6f5a",
-          "which therefore survives only as the disabled colour")
-    # The selected tab is the one surface tinted with the accent. Its tint is
-    # read from the token, not retyped here, so a stronger tint fails this row.
-    *rgb, alpha = (float(v) for v in re.findall(r"[\d.]+", C["tab"]))
-    ratio = contrast(C["text"], over(rgb, alpha, tiers["card fill"]))
-    check(ratio >= 4.5, "the selected tab's text clears AA on its accent tint",
-          f"{C['tab']} over the switch: {ratio:.2f}:1")
+
+LOG_LINE = "{day} 10:{m:02d}:00,000 INFO    {name:<16} {msg}"
+
+
+def log_lines(day: str) -> list[str]:
+    """A day of shout.log: a warmup (transcribed, no END-TO-END), three
+    dictations of which the first predates the word count, and an empty
+    transcript. Expected: 3 dictations, 7 + 12 = 19 words over 2 of them,
+    median 210ms."""
+    rows = [("shout.transcribe", "transcribed 11.0s of audio in 0.40s -> 61 chars, 11 words"),
+            ("shout.transcribe", "warmup 0.40s -> 'And so my fellow Americans'"),
+            ("shout.transcribe", "transcribed 2.0s of audio in 0.16s -> 20 chars"),
+            ("shout", "END-TO-END 160ms for 2.0s of audio -> pasted"),
+            ("shout.transcribe", "transcribed 3.1s of audio in 0.20s -> 38 chars, 7 words"),
+            ("shout", "END-TO-END 210ms for 3.1s of audio -> pasted (joined)"),
+            ("shout.transcribe", "transcribed 0.6s of audio in 0.10s -> 0 chars, 0 words"),
+            ("shout", "empty transcript, nothing to inject"),
+            ("shout.transcribe", "transcribed 6.0s of audio in 0.30s -> 70 chars, 12 words"),
+            ("shout", "END-TO-END 640ms for 6.0s of audio -> pasted")]
+    return [LOG_LINE.format(day=day, m=i, name=n, msg=msg) for i, (n, msg) in
+            enumerate(rows)]
+
+
+def home_rows(app, win, recent) -> None:
+    from datetime import timedelta
+    home = win.home
+    logs = TMP / "Shout"
+    today = date.today()
+    yday = today - timedelta(days=1)
+
+    def write_log(name: str, lines: list[str]) -> None:
+        (logs / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def shown(w) -> bool:
+        return not w.isHidden()
+
+    def fresh() -> None:
+        """Refresh as if every file and the store had just changed: two writes
+        in the same tick can leave a file's stamp where it was."""
+        home._stamp = home._config_stamp = None
+        home._version = -1
+        home.refresh()
+
+    win.show_page("home")
+    took = pump(app, 2.0, lambda: home.hero.drawn >= 10)
+    check(took is not None and home.hero.renderer is not None,
+          "shown, the home orb animates", f"{home.hero.drawn} frames")
+
+    # Nothing logged yet: no file at all.
+    for name in ("shout.log", "shout.log.1"):
+        (logs / name).unlink(missing_ok=True)
+    home._stamp = None
+    fresh()
+    check(ui.today_stats(logs).dictations == 0 and shown(home.today_empty)
+          and shown(home.speed_empty) and not shown(home.today_count),
+          "with no shout.log, Today and Speed say no dictations yet",
+          home.today_empty.text())
+
+    write_log("shout.log", log_lines(today.isoformat()))
+    st = ui.today_stats(logs)
+    check((st.dictations, st.words, st.counted, st.latencies)
+          == (3, 19, 2, [160, 210, 640]),
+          "today's log: three dictations, words only from the lines that count them",
+          f"{st.dictations} dictations, {st.words} words over {st.counted}, "
+          f"latencies {st.latencies}")
+    fresh()
+    check(home.today_count.text() == "3" and home.today_words.text()
+          == "19 words in the last 2" and home.speed.text().startswith("0.2<")
+          and len(home.spark.values) == 3 and not shown(home.today_empty),
+          "and the Today and Speed cards show them",
+          f"{home.today_count.text()!r}, {home.today_words.text()!r}, "
+          f"speed {home.speed.text()[:4]!r}, {len(home.spark.values)} points")
+
+    # Control: the same lines dated yesterday are not today's, and the parser
+    # does see them when asked about yesterday, so zero is not blindness.
+    write_log("shout.log", log_lines(yday.isoformat()))
+    check(ui.today_stats(logs).dictations == 0
+          and ui.today_stats(logs, yday).dictations == 3,
+          "a log from yesterday counts zero today, and three for yesterday (control)",
+          f"today {ui.today_stats(logs).dictations}, yesterday "
+          f"{ui.today_stats(logs, yday).dictations}")
+    fresh()
+    check(shown(home.today_empty) and not shown(home.today_count),
+          "and the cards go back to no dictations yet today")
+
+    # Rotation: the current file starts today, so the previous one may hold
+    # today's earlier lines; when it does not start today, it cannot.
+    write_log("shout.log.1", log_lines(yday.isoformat()) + log_lines(today.isoformat()))
+    write_log("shout.log", log_lines(today.isoformat()))
+    rotated = ui.today_stats(logs).dictations
+    write_log("shout.log", log_lines(yday.isoformat())[-2:] + log_lines(today.isoformat()))
+    unrotated = ui.today_stats(logs).dictations
+    check(rotated == 6 and unrotated == 3,
+          "after a rotation today, the previous file's lines from today count too",
+          f"{rotated} with a rotation today, {unrotated} without")
+    for name in ("shout.log", "shout.log.1"):
+        (logs / name).unlink(missing_ok=True)
+
+    # Your words, from config.json as it is now: two written, then none.
+    kept = read_config()
+    write_config(kept | {"words": ["Ogerpon", "TCGplayer"],
+                         "replacements": {"cache": "cash"}})
+    fresh()
+    two = (home.names.text(), home.names_detail.text())
+    write_config(kept | {"words": [], "replacements": {}})
+    fresh()
+    check(two[0] == "2 names" and two[1].startswith("1 fix · ")
+          and home.names.text() == "0 names",
+          "Your words counts the words and fixes in config.json, as it changes",
+          f"{two} then {home.names.text()!r}")
+    write_config(kept)
+
+    # The last dictation, and Fix and Add a word.
+    recent.clear()
+    fresh()
+    check(not home.copy.isEnabled() and not home.fix.isEnabled(),
+          "with nothing dictated, Copy and Fix are off", home.last_text.text())
+    recent.add("we count the cache tonight")
+    fresh()
+    check(home.last_text.text() == "we count the cache tonight" and home.fix.isEnabled(),
+          "the last dictation shows on home", home.last_text.text())
+    home.fix.click()
+    app.processEvents()
+    bar = win.recent_page.fix_bar
+    check(win.stack.currentWidget() is win.recent_page and win.tabs["recent"].isChecked()
+          and bar.isVisible() and win.recent_page.shown
+          and win.recent_page.shown[0].entry.text == "we count the cache tonight",
+          "Fix on the last dictation opens Recent with its fix bar, that dictation on top",
+          f"{type(win.stack.currentWidget()).__name__}, bar visible={bar.isVisible()}")
+    bar.close_bar("")
+    recent.clear()
+    win.show_page("home")
+    home.add_word.click()
+    app.processEvents()
+    check(win.stack.currentWidget() is win.words_page and win.tabs["words"].isChecked(),
+          "Add a word lands on the Words page",
+          type(win.stack.currentWidget()).__name__)
+    win.recent_page.status.setText("")
+    win.show_page("orb")
+
+
+def settings_rows(app, win) -> None:
+    page = win.settings_page
+    win.show_page("settings")
+    app.processEvents()
+
+    def changed_by(action) -> dict:
+        before = read_config()
+        action()
+        app.processEvents()
+        after = read_config()
+        return {k: after.get(k) for k in set(before) | set(after)
+                if before.get(k, "<absent>") != after.get(k, "<absent>")}
+
+    # Control: the diff sees a second key when one is written.
+    extra = changed_by(lambda: merge({"language": "fr", "beam_size": 4}))
+    check(set(extra) == {"language", "beam_size"},
+          "the settings diff sees every key a write touches (control)",
+          f"{sorted(extra)}")
+    write_config({k: v for k, v in read_config().items()
+                  if k not in ("language", "beam_size")})
+
+    auto = page.language.findData(None)
+    got = changed_by(lambda: page.language.setCurrentIndex(auto))
+    check(got == {"language": None},
+          "Language writes only language", f"{got}")
+    got = changed_by(lambda: page.language.setCurrentIndex(page.language.findData("de")))
+    check(got == {"language": "de"}, "and a picked code", f"{got}")
+    if page.mic.count() > 1:
+        got = changed_by(lambda: page.mic.setCurrentIndex(1))
+        check(got == {"input_device": page.mic.itemData(1)},
+              "Microphone writes only input_device", f"{got}")
+        got = changed_by(lambda: page.mic.setCurrentIndex(0))
+        check(got == {"input_device": None},
+              "and following the default writes null", f"{got}")
+    else:
+        check(page.mic.itemData(0) is None,
+              "Microphone offers following the default (no other input listed here)")
+    got = changed_by(page.overlay.click)
+    check(got == {"overlay": not ui.Config().overlay},
+          "the overlay switch writes only overlay", f"{got}")
+    got = changed_by(page.cues.click)
+    check(got == {"cues": not ui.Config().cues}, "the cues switch writes only cues",
+          f"{got}")
+    page.volume.setFocus()
+    got = changed_by(lambda: QtWidgets.QApplication.sendEvent(page.volume, QtGui.QKeyEvent(
+        E.KeyPress, QtCore.Qt.Key.Key_Right, QtCore.Qt.KeyboardModifier.NoModifier)))
+    check(set(got) == {"cue_volume"} and abs(got["cue_volume"]
+                                             - page.volume.value() / 100) < 1e-9,
+          "Cue volume writes only cue_volume", f"{got}")
+    check(RESTART_TEXT in page.status.text() or "next cue" in page.status.text(),
+          "and the page says whether a restart is needed", page.status.text())
+    write_config({k: v for k, v in read_config().items()
+                  if k not in ("language", "input_device", "overlay", "cues")})
+
+    # Start with Windows, in the THROWAWAY Startup folder only.
+    link = ui.startup_link()
+    check(str(link).startswith(str(TMP)) and not link.exists(),
+          "precondition: the Startup shortcut path is inside the throwaway APPDATA",
+          str(link))
+    if not str(link).startswith(str(TMP)):
+        return
+    before = read_config()
+    page.autostart.click()
+    target = ""
+    if link.exists():
+        import subprocess
+        target = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(New-Object -ComObject WScript.Shell).CreateShortcut($env:L).TargetPath"],
+            env=os.environ | {"L": str(link)}, capture_output=True, text=True,
+            timeout=30).stdout.strip()
+    check(link.exists() and page.autostart.isChecked()
+          and Path(target).resolve() == (ROOT / ".venv" / "Scripts" / "shoutw.exe").resolve(),
+          "Start with Windows makes a Startup shortcut to shoutw.exe",
+          f"target {target!r}; {page.status.text()}")
+    check(read_config() == before, "and writes nothing to config.json")
+    page.autostart.click()
+    check(not link.exists() and not page.autostart.isChecked(),
+          "and turning it off removes the shortcut", str(link))
+    real = ui.LAUNCHER
+    ui.LAUNCHER = TMP / "missing" / "shoutw.exe"
+    try:
+        page.autostart.click()
+    finally:
+        ui.LAUNCHER = real
+    check(not link.exists() and not page.autostart.isChecked()
+          and "install_shortcuts" in page.status.text(),
+          "with no launcher installed, it refuses, stays off and says why (control)",
+          page.status.text())
+    win.show_page("orb")
 
 
 def main() -> int:
@@ -264,6 +555,25 @@ def main() -> int:
     check(win.stack.currentWidget() is lab,
           "precondition: the window opened on the page it was asked for",
           type(win.stack.currentWidget()).__name__)
+
+    hero = win.home.hero
+    check(hero.drawn == 0 and not hero._timer.isActive(),
+          "the home orb draws nothing while its page is not showing",
+          f"{hero.drawn} frames, timer active={hero._timer.isActive()}")
+    check(hero.state == "ready",
+          "with no model state passed in, home says Ready", hero.state)
+    states = iter(["loading", "error", "ready"])
+    seen = []
+    win.home.model_state = lambda: current[0]
+    for want in states:
+        current = [want]
+        win.home.refresh()
+        seen.append((want, hero.state, hero.STATES[hero.state]))
+    check(all(a == b for a, b, _ in seen) and [t for *_, t in seen]
+          == ["Loading", "Error", "Ready"],
+          "home shows the state Shout's callable reports, as it changes",
+          f"{seen}")
+    win.home.model_state = lambda: "ready"
 
     # -- opening on a legacy config ------------------------------------------
     check(abs(lab.voice.root_hz - 369.45) < 0.01,
@@ -728,12 +1038,16 @@ def main() -> int:
     shout._config_timer.stop()
     shout.cues.close()
 
+    home_rows(app, win, recent)
+    settings_rows(app, win)
+
     # -- the recent dictations page -------------------------------------------
     page = win.recent_page
     win.tabs["recent"].click()
     app.processEvents()
     check(win.stack.currentWidget() is page and win.tabs["recent"].isChecked()
-          and not any(win.tabs[k].isChecked() for k in ("sounds", "orb")),
+          and not any(win.tabs[k].isChecked() for k in ui.Window.PAGES
+                      if k != "recent"),
           "clicking a tab shows its page and marks only that tab",
           type(win.stack.currentWidget()).__name__)
     check(page.empty.isVisible() and not page.shown and not page.clear.isEnabled(),
@@ -810,6 +1124,17 @@ def main() -> int:
     check(took is not None,
           "precondition: a full list overflows the card and scrolls, not squashes",
           f"scroll range {bar.maximum()}px")
+    # Every other page full as well: a dozen words wrapping as chips, fixes, and
+    # a day of dictations on home.
+    write_config(read_config() | {
+        "words": [f"Name{i} Longername{i}" if i % 4 == 0 else f"Word{i}"
+                  for i in range(14)],
+        "replacements": {f"heard {i}": f"Written {i}" for i in range(8)}})
+    win.words_page.refresh()
+    (TMP / "Shout" / "shout.log").write_text(
+        "\n".join(log_lines(date.today().isoformat()) * 8) + "\n", encoding="utf-8")
+    win.home._stamp = win.home._config_stamp = None
+    win.home.refresh()
     for name in ui.Window.PAGES:
         win.show_page(name)
         app.processEvents()
@@ -819,11 +1144,12 @@ def main() -> int:
               f"{win.minimumSizeHint().width()}x{win.minimumSizeHint().height()}"
               + (f", squeezed: {bad}" if bad else ""))
     tall = win.height()
-    win.resize(win.width(), 736)
+    short = win.minimumSizeHint().height() - 120
+    win.resize(win.width(), short)
     app.processEvents()
     check(win.height() >= win.minimumSizeHint().height(),
           "and the window cannot be dragged below that minimum",
-          f"asked for 736, Qt clamped to {win.height()}")
+          f"asked for {short}, Qt clamped to {win.height()}")
     # Control: with the floor explicitly lifted -- the only way to get under it --
     # the same sweep must report the clipping that 736px actually causes.
     # Without this the row above passes on a sweep that can no longer see
@@ -832,11 +1158,11 @@ def main() -> int:
     # stick, because the layout re-imposes its own on the next activation --
     # which is exactly why the row above holds for the user, and why the first
     # attempt at this control silently measured a window still 840px tall.
-    win.setFixedHeight(736)
+    win.setFixedHeight(short)
     app.processEvents()
     check(len(squeezed(win)) > 0,
           "and the sweep detects clipping when it happens (control)",
-          f"{len(squeezed(win))} widgets clipped at 736px tall")
+          f"{len(squeezed(win))} widgets clipped at {short}px tall")
     win.setMinimumSize(0, 0)
     win.setMaximumSize(16777215, 16777215)
     win.resize(win.width(), tall)
@@ -856,6 +1182,8 @@ def main() -> int:
           "or every open/close of the window leaks one inside Shout")
     check(preview.renderer is None and not preview._timer.isActive(),
           "and the orb preview's renderer and timer")
+    check(hero.renderer is None and not hero._timer.isActive(),
+          "and the home orb's")
     app.quit()
 
     for ok, name, detail in rows:

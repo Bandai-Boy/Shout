@@ -129,6 +129,8 @@ class Shout:
                          self.set_overlay_style, self.overlay.style)
         self.commits = ThreadPoolExecutor(max_workers=1, thread_name_prefix="commit")
         self.ready = threading.Event()
+        # What the window's home page says: "loading", "ready" or "error".
+        self.model_state = "loading"
         self.transcriber = None
         self._capture_started = 0.0
         self._stopping = False
@@ -161,6 +163,7 @@ class Shout:
                 # huggingface_hub's LocalEntryNotFoundError: the model was never
                 # downloaded. Shout runs offline and cannot fetch it, so say how to.
                 log.exception("speech model is not downloaded")
+                self.model_state = "error"
                 self._set_state("error")
                 self.tray.notify("Speech model not downloaded. Run scripts\\install.ps1 "
                                  "(see the README).")
@@ -176,11 +179,13 @@ class Shout:
                         return
                     continue
                 log.exception("model failed to load")
+                self.model_state = "error"
                 self._set_state("error")
                 self.tray.notify("Windows blocked a file Shout needs — see shout.log"
                                  if blocked else "Model failed to load — see shout.log")
                 return
             self.ready.set()
+            self.model_state = "ready"
             self._publish_state()
             log.info("READY in %.2fs from launch", time.perf_counter() - t0)
             return
@@ -362,13 +367,13 @@ class Shout:
 
     # -- the window and the recent list --------------------------------------
 
-    def open_window(self, page: str) -> None:
+    def open_window(self, page: str = "home") -> None:
         """GUI thread, from the tray menu. One window: opening it again raises
         it and switches the page rather than stacking a second copy."""
         if self.window is None or not self.window.isVisible():
             if self.window is not None:
                 self.window.deleteLater()
-            self.window = Window(self.recent, page)
+            self.window = Window(self.recent, page, lambda: self.model_state)
         else:
             self.window.show_page(page)
         if self.window.isMinimized():

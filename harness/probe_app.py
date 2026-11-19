@@ -422,7 +422,8 @@ def main() -> int:
     # real question about the app. Through the real menu actions, on the GUI
     # thread, the way a click delivers them.
     labels = [a.text() for a in app.tray._menu.actions() if not a.isSeparator()]
-    check(labels == ["Recent dictations...", "Words...", "Cue sounds...", "Orb look...",
+    check(labels == ["Open Shout...", "Recent dictations...", "Words...",
+                     "Cue sounds...", "Orb look...", "Settings...",
                      "Appearance",
                      "Quit Shout"],
           "the tray menu opens each page of the window, picks a look, and quits",
@@ -461,6 +462,16 @@ def main() -> int:
     check(app.window is first and first.stack.currentWidget() is first.orb_page,
           "Orb look... switches it to the orb page",
           type(app.window.stack.currentWidget()).__name__)
+    actions["Settings..."].trigger()
+    check(app.window is first and first.stack.currentWidget() is first.settings_page,
+          "Settings... switches it to the settings page",
+          type(app.window.stack.currentWidget()).__name__)
+    actions["Open Shout..."].trigger()
+    check(app.window is first and first.stack.currentWidget() is first.home
+          and first.home.hero.state == app.model_state,
+          "Open Shout... switches it to home, which shows the model's state",
+          f"{type(app.window.stack.currentWidget()).__name__}, hero says "
+          f"{first.home.hero.state!r}, Shout says {app.model_state!r}")
     first.close()
     actions["Recent dictations..."].trigger()
     check(app.window is not first and app.window.isVisible(),

@@ -259,6 +259,8 @@ class Transcriber:
         if hint or fixed:
             log.info("your words: %d heard (%d chars), %d fixes made",
                      len(vocab.heard()), len(hint or ""), fixed)
-        log.info("transcribed %.1fs of audio in %.2fs -> %d chars",
-                 len(audio) / SAMPLE_RATE, time.perf_counter() - t0, len(text))
+        # A count of words, never the words: the home page totals them.
+        log.info("transcribed %.1fs of audio in %.2fs -> %d chars, %d words",
+                 len(audio) / SAMPLE_RATE, time.perf_counter() - t0, len(text),
+                 len(text.split()))
         return text

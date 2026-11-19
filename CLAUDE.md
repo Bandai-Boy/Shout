@@ -54,8 +54,12 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # sync, model, sho
 
 ## The Shout window
 
-`shout/window.py` is one window with three pages, **Recent dictations**, **Cue
-sounds** and **Orb**, opened from the tray menu (an entry per page). It runs INSIDE Shout's
+`shout/window.py` is one window with six pages, **Home**, **Recent dictations**,
+**Words**, **Cue sounds**, **Look** (the orb; page key `orb`) and **Settings**,
+picked from an icon rail on the left and opened from the tray menu (an entry
+per page; **Open Shout...** is Home). The page keys the tray and `__main__` use
+are `home`, `recent`, `words`, `sounds`, `orb`, `settings`, and `win.tabs` is
+still a dict of checkable buttons keyed by them. It runs INSIDE Shout's
 process, on the GUI thread; the cue lab used to be a separate `scripts/cue_lab.py`
 process and moved in on 10 Sep, because the recent dictations live only in
 Shout's memory (`shout/recent.py`, the last 10) and a second process could only
@@ -103,6 +107,54 @@ needing 85).
 **Re-run `harness/probe_cues.py` after saving a new voice:** that gate reads the
 configured voice and asserts the cue stays inert in the transcript, which is a
 property of the sound, not of the code.
+
+**The look is glass** (rebuilt 19 Nov from an approved mock-up): a slate-lavender
+to dusty-rose wash painted in `Window.paintEvent`, 12% white cards with a 1px
+light border and 24px radius, Segoe UI Variable (Display Light for big numbers),
+solid white text, one white pill per page as the primary button. The orb is the
+only saturated colour. Every colour is a token in `C`, and `probe_lab`'s style
+rows composite each text colour over every surface it is drawn on at the wash's
+LIGHTEST stop and require 4.5:1, with faded white and the mock-up's own lighter
+wash (white on a button in a card: 4.21, hovered: 3.81) as the two controls.
+That is why the wash is darker than the mock-up's, and why text fields are a
+darker well (`field`) than the card: on a white-tinted field no placeholder
+dimmer than white cleared AA. White on a hovered button is the tightest pair in
+the window at 4.51:1, so a lighter wash or a stronger hover fill fails a row.
+Qt trap met on the way: a sheet's `min-height` is applied at polish time and
+overrides `setFixedSize`, which squashed the 44px rail buttons to 21px; sizes
+for the rail and the icon-only X buttons live in the QSS (`#nav`, `#icon36`,
+`#icon28`). Icons are the mock-up's stroke SVGs drawn with QSvgRenderer, each
+icon-only button with a tooltip and an accessible name. The native title bar
+is kept (tinted to the wash with `DwmSetWindowAttribute` on Windows 11); the
+mock-up's custom one was not built.
+
+**Home** is the orb (the overlay's own Renderer and Choreography, magnified so
+its ring is 226px, no supersampling at that size) with the model state in the
+middle, from a zero-argument callable Shout passes as `Window(..., model_state=)`
+(`Shout.model_state`: loading / ready / error; the gates pass none and get
+Ready), and four cards. **Today** and **Speed** read `shout.log` (and
+`shout.log.1` only when the current file STARTS today, i.e. it rotated today):
+one `END-TO-END <ms>ms` line per dictation, paired with the `transcribed ... ->
+N chars, W words` line before it. The word count on that line is new (19 Nov),
+a count only; older lines carry none, so the words total counts only the
+dictations that carry one and says "in the last N" when that is not all of
+them. A warmup or an empty transcript logs `transcribed` with no END-TO-END, so
+its count never lands. The parse is cached on the two files' mtime and size and
+refreshed twice a second only while Home shows; the orb animates only then too.
+**Your words** counts `words.stored()`; **Add a word** goes to Words, and **Fix**
+on the last dictation goes to Recent with its fix bar open.
+
+**Settings** writes one key per control through `merge()` (`language`,
+`input_device`, `overlay`, `cues`, `cue_volume`). Only `cue_volume` is followed
+live; the rest say "Restart Shout to apply." The microphone list is "Follow the
+Windows default (recommended)" plus the MME inputs other than the Sound Mapper,
+because `input_device` is an MME index and Windows renumbers those. **Start with
+Windows** is not a key: it makes or removes `%APPDATA%\...\Startup\Shout.lnk`,
+the same shortcut `install_shortcuts.ps1 -Autostart` makes, through the same
+WScript.Shell COM object in a hidden PowerShell, then reads the saved
+shortcut's target back and refuses (removing it) unless it is `shoutw.exe`.
+With no `shoutw.exe` it refuses and points at the installer. `probe_lab` drives
+it inside its throwaway APPDATA only, and asserts that path before clicking.
 
 ## The orb
 
@@ -171,7 +223,7 @@ the picture. If OpenGL fails at start or mid-render, the overlay logs it and
 draws the pill, and the tray ticks what is actually on screen.
 
 Every knob is a field of `orb.Tune` (defaults = the shipped look, asserted
-against the pre-Tune literals by `probe_orb`). The **Orb** page edits it with a
+against the pre-Tune literals by `probe_orb`). The **Look** page (key `orb`) edits it with a
 preview that is the overlay's own Renderer and Choreography, and Save merges
 only the fields that moved as `orb_tune`, which a running Shout follows. Save
 never switches the look (Gabe's call, 17 Sep); the page's On screen switch does,

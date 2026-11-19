@@ -67,7 +67,8 @@ def _icon(state: str) -> QtGui.QIcon:
 
 class Tray:
     def __init__(self, on_quit, on_open, on_click, on_style, style: str) -> None:
-        """`on_open(page)` shows the Shout window on "recent", "words", "sounds" or "orb";
+        """`on_open(page)` shows the Shout window on "home", "recent", "words",
+        "sounds", "orb" or "settings";
         `on_click()` is a left click on the icon; `on_style(style)` picks the
         overlay's look, which starts as `style`. All run on the GUI thread."""
         self._on_quit = on_quit
@@ -108,12 +109,14 @@ class Tray:
         self.icon.activated.connect(self._activated)
         menu = QtWidgets.QMenu()
         # The tray is the only way into Shout, so anything you might want to open
-        # has to be reachable from here. Both entries open the same window, on
-        # the page they name.
-        for text, page in (("Recent dictations...", "recent"),
+        # has to be reachable from here. Every entry opens the same window, on
+        # the page it names.
+        for text, page in (("Open Shout...", "home"),
+                           ("Recent dictations...", "recent"),
                            ("Words...", "words"),
                            ("Cue sounds...", "sounds"),
-                           ("Orb look...", "orb")):
+                           ("Orb look...", "orb"),
+                           ("Settings...", "settings")):
             action = menu.addAction(text)
             action.triggered.connect(lambda _checked=False, p=page: self._on_open(p))
         looks = menu.addMenu("Appearance")
