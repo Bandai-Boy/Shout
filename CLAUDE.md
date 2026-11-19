@@ -129,7 +129,13 @@ Qt trap met on the way: a sheet's `min-height` is applied at polish time and
 overrides `setFixedSize`, which squashed the 44px rail buttons to 21px; sizes
 for the rail and the icon-only X buttons live in the QSS (`#nav`, `#icon36`,
 `#icon28`). Icons are the mock-up's stroke SVGs drawn with QSvgRenderer, each
-icon-only button with a tooltip and an accessible name. The native title bar
+icon-only button with a tooltip and an accessible name, except the rail: its
+tabs have no tooltip, and `NavLabel` (Vendor Vault's sidebar pattern) shows the
+page's name in a pill beside the hovered or focused tab at once. The four Home
+cards are `HoverCard`s: on hover the border brightens and a `sheen` fades in
+over the top `SHEEN_REACH` (0.45) only, because any fill under a card's buttons
+pushes white-on-hovered-button (4.51:1) under AA. `probe_lab`'s hover rows
+check that, with a full-height sheen as the control. The native title bar
 is kept (tinted to the wash with `DwmSetWindowAttribute` on Windows 11); the
 mock-up's custom one was not built.
 

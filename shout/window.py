@@ -151,6 +151,8 @@ C = {
     "inset_border": "rgba(255,255,255,0.40)", "hover_border": "rgba(255,255,255,0.65)",
     "rule": "rgba(255,255,255,0.22)", "track": "rgba(255,255,255,0.28)",
     "white_hover": "#f1eef8",
+    # A hovered Home card's sheen, across its top only (HoverCard says why).
+    "sheen": "rgba(255,255,255,0.06)",
     # Text fields sit a shade DARKER than the card, a well rather than a raised
     # tile: on a white-tinted field no placeholder dimmer than white cleared AA.
     "field": "rgba(24,20,48,0.16)",
@@ -315,6 +317,10 @@ QPushButton#nav:hover {{ background: {C['inset_hover']}; }}
 QPushButton#nav:checked {{ background: #ffffff; }}
 QPushButton#nav:focus {{ border: 1px solid #ffffff; }}
 QPushButton#nav:checked:focus {{ border: 2px solid {C['ink']}; }}
+QLabel#navlabel {{
+    background: {C['popup']}; border: 1px solid {C['border']}; border-radius: 10px;
+    padding: 6px 12px; color: {C['text']};
+}}
 
 /* A two- or four-way switch: one control, so it reads as a choice of view
    rather than as buttons that do something. */
@@ -873,6 +879,129 @@ class Card(QtWidgets.QFrame):
         self.box = QtWidgets.QVBoxLayout(self)
         self.box.setContentsMargins(*margins)
         self.box.setSpacing(spacing)
+
+
+def qcolour(token: str) -> QtGui.QColor:
+    """A '#rrggbb' or 'rgba(r,g,b,a)' token from C as a QColor."""
+    if token.startswith("#"):
+        return QtGui.QColor(token)
+    r, g, b, a = (float(v) for v in token[5:-1].split(","))
+    return QtGui.QColor(int(r), int(g), int(b), round(a * 255))
+
+
+def _tween(owner: QtCore.QObject, ms: int, step) -> QtCore.QVariantAnimation:
+    anim = QtCore.QVariantAnimation(owner)
+    anim.setDuration(ms)
+    anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+    anim.valueChanged.connect(lambda v: step(float(v)))
+    return anim
+
+
+def _run(anim: QtCore.QVariantAnimation, start: float, end: float, step) -> None:
+    """Animate from start to end, or jump there when Windows says no animations."""
+    anim.stop()
+    if animations_wanted():
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.start()
+    else:
+        step(end)
+
+
+class HoverCard(Card):
+    """A Home card that answers the pointer: its border brightens and a sheen
+    fades in across its top. The sheen fades out by SHEEN_REACH of the height,
+    above the card's buttons, because white on a hovered button in a card is
+    already the tightest pair in the window (4.51:1) and any fill under it
+    fails AA. probe_lab asserts both halves."""
+
+    SHEEN_REACH = 0.45
+    MS = 160
+
+    def __init__(self, *args) -> None:
+        super().__init__(*args)
+        self.glow = 0.0
+        self._anim = _tween(self, self.MS, self._set)
+
+    def _set(self, value: float) -> None:
+        self.glow = value
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        _run(self._anim, self.glow, 1.0, self._set)
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        _run(self._anim, self.glow, 0.0, self._set)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)           # the QSS card
+        if self.glow <= 0.0:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        sheen = qcolour(C["sheen"])
+        sheen.setAlphaF(sheen.alphaF() * self.glow)
+        grad = QtGui.QLinearGradient(0, 0, 0, self.height() * self.SHEEN_REACH)
+        grad.setColorAt(0.0, sheen)
+        grad.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(grad)
+        p.drawRoundedRect(rect, 24, 24)
+        # The border, from its resting white to the hover one.
+        rest, hover = qcolour(C["border"]), qcolour(C["hover_border"])
+        edge = QtGui.QColor(255, 255, 255, round(rest.alpha() + (hover.alpha()
+                                                                 - rest.alpha()) * self.glow))
+        p.setPen(QtGui.QPen(edge, 1.0))
+        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect, 24, 24)
+
+
+class NavLabel(QtWidgets.QLabel):
+    """The rail's hover label, the way Vendor Vault's sidebar does it: the
+    page's name in a pill beside the icon, at once, where a tooltip waits
+    ~700ms and draws in the system's style. It also shows for keyboard focus.
+    A child of the window, raised over the page, and transparent to the mouse
+    so it never takes the hover from what is under it."""
+
+    GAP = 10                                # from the rail's right edge
+    SLIDE = 6                               # px it slides in from
+    MS = 140
+
+    def __init__(self, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("navlabel")
+        self.setFont(font(13))
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._fade = QtWidgets.QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._fade)
+        self._anim = _tween(self, self.MS, self._step)
+        self._at = QtCore.QPoint()
+        self.for_tab: QtWidgets.QWidget | None = None
+        self.hide()
+
+    def show_for(self, tab: QtWidgets.QWidget, rail: QtWidgets.QWidget) -> None:
+        self.for_tab = tab
+        self.setText(tab.accessibleName())
+        self.adjustSize()
+        mid = tab.mapTo(self.parentWidget(), QtCore.QPoint(0, tab.height() // 2))
+        right = rail.mapTo(self.parentWidget(), QtCore.QPoint(rail.width(), 0)).x()
+        self._at = QtCore.QPoint(right + self.GAP, mid.y() - self.height() // 2)
+        self.raise_()
+        self.show()
+        _run(self._anim, 0.0, 1.0, self._step)
+
+    def _step(self, t: float) -> None:
+        self._fade.setOpacity(t)
+        self.move(self._at.x() - round(self.SLIDE * (1.0 - t)), self._at.y())
+
+    def hide_for(self, tab: QtWidgets.QWidget) -> None:
+        if tab is self.for_tab:
+            self._anim.stop()
+            self.for_tab = None
+            self.hide()
 
 
 def switch(options, on_pick, group_parent, columns: int = 0
@@ -2281,8 +2410,8 @@ class HomePage(QtWidgets.QWidget):
     # -- cards ---------------------------------------------------------------
 
     @staticmethod
-    def _card() -> Card:
-        return Card((20, 18, 20, 18), 6)
+    def _card() -> HoverCard:
+        return HoverCard((20, 18, 20, 18), 6)
 
     def _today_card(self) -> Card:
         card = self._card()
@@ -2735,8 +2864,9 @@ class Window(QtWidgets.QWidget):
             tab.setCheckable(True)
             tab.setIcon(svg_icon(key, 19, checked_colour=C["ink"]))
             tab.setIconSize(QtCore.QSize(19, 19))
-            tab.setToolTip(text)
+            # No tooltip: the NavLabel names it, at once and in this window's style.
             tab.setAccessibleName(text)
+            tab.installEventFilter(self)
             # Keyboard focus only: a clicked tab that keeps a focus ring reads
             # as a second highlight laid over the checked one.
             tab.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
@@ -2745,6 +2875,8 @@ class Window(QtWidgets.QWidget):
             group.addButton(tab)
             nav.addWidget(tab)
             self.tabs[key] = tab
+        self.rail = rail
+        self.nav_label = NavLabel(self)
         column = QtWidgets.QVBoxLayout()
         column.addStretch(1)
         column.addWidget(rail)
@@ -2773,6 +2905,15 @@ class Window(QtWidgets.QWidget):
         # tallest page, so switching pages never resizes it.
         hint = self.sizeHint()
         self.resize(max(940, hint.width()), hint.height())
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        """The rail's tabs: name the one under the pointer or with focus."""
+        kind = event.type()
+        if kind in (QtCore.QEvent.Type.Enter, QtCore.QEvent.Type.FocusIn):
+            self.nav_label.show_for(obj, self.rail)
+        elif kind in (QtCore.QEvent.Type.Leave, QtCore.QEvent.Type.FocusOut):
+            self.nav_label.hide_for(obj)
+        return False
 
     def show_page(self, key: str) -> None:
         if key == "words":

@@ -233,6 +233,7 @@ def surfaces(wash: list[str]) -> dict[str, tuple[float, float, float]]:
             "text field": over(C["field"], card),
             "hovered inset": over(C["inset_hover"], card),
             "pressed button": over(C["card"], card),
+            "a hovered Home card's sheen": over(C["sheen"], card),
             "popup": parse_colour(C["popup"])[0]}
 
 
@@ -446,6 +447,96 @@ def home_rows(app, win, recent) -> None:
           type(win.stack.currentWidget()).__name__)
     win.recent_page.status.setText("")
     win.show_page("orb")
+
+
+def hover_rows(app, win) -> None:
+    """The rail names a tab on hover, and the Home cards answer the pointer
+    without putting any fill under their buttons."""
+    win.show_page("home")
+    app.processEvents()
+    label = win.nav_label
+
+    def enter(w) -> None:
+        pos = QtCore.QPointF(w.width() / 2, w.height() / 2)
+        app.sendEvent(w, QtGui.QEnterEvent(pos, pos, QtCore.QPointF(w.mapToGlobal(pos))))
+        pump(app, 0.3)
+
+    def leave(w) -> None:
+        app.sendEvent(w, QtCore.QEvent(QtCore.QEvent.Type.Leave))
+        pump(app, 0.05)
+
+    tips = [k for k, t in win.tabs.items() if t.toolTip()]
+    check(not tips, "no rail tab carries a tooltip; the label names it instead",
+          f"tooltips on {tips}")
+    check(not label.isVisible(), "precondition: no label before any hover")
+    tab = win.tabs["words"]
+    enter(tab)
+    mid = tab.mapTo(win, QtCore.QPoint(0, tab.height() // 2)).y()
+    rail_right = win.rail.mapTo(win, QtCore.QPoint(win.rail.width(), 0)).x()
+    g = label.geometry()
+    check(label.isVisible() and label.text() == "Words",
+          "hovering a rail tab shows its page's name", f"{label.isVisible()} {label.text()!r}")
+    check(g.left() == rail_right + label.GAP and abs(g.center().y() - mid) <= 1,
+          "beside the rail, level with the tab",
+          f"left {g.left()} want {rail_right + label.GAP}, centre {g.center().y()} want {mid}")
+    check(win.rect().contains(g), "and inside the window", f"{g} in {win.rect()}")
+    other = win.tabs["settings"]
+    leave(tab)
+    enter(other)
+    check(label.isVisible() and label.text() == "Settings",
+          "moving to the next tab names that one", label.text())
+    leave(tab)                      # a late leave from the old tab changes nothing
+    check(label.isVisible() and label.text() == "Settings",
+          "a stale leave from the tab before does not hide it")
+    leave(other)
+    check(not label.isVisible(), "leaving the tab hides the name")
+
+    cards = win.home.findChildren(ui.HoverCard)
+    check(len(cards) == 4, "the four Home cards answer the pointer", f"{len(cards)}")
+    worst = []
+    for card in cards:
+        tops = [b.mapTo(card, QtCore.QPoint(0, 0)).y()
+                for b in card.findChildren(QtWidgets.QPushButton) if b.isVisible()]
+        if tops:
+            worst.append(min(tops) / card.height())
+    check(len(worst) == 2 and min(worst) > ui.HoverCard.SHEEN_REACH,
+          "the sheen fades out above every card's buttons",
+          f"{len(worst)} cards with buttons, highest at {min(worst or [0]):.2f} "
+          f"of its card, sheen to "
+          f"{ui.HoverCard.SHEEN_REACH}")
+
+    # Rendered: brighter at the top, untouched beside the buttons.
+    card = next(c for c in cards if c.findChildren(QtWidgets.QPushButton))
+    button = min((b for b in card.findChildren(QtWidgets.QPushButton) if b.isVisible()),
+                 key=lambda b: b.y())
+    by = button.mapTo(card, QtCore.QPoint(0, button.height() // 2)).y()
+
+    def pixels() -> tuple[int, int]:
+        img = card.grab().toImage()
+        dpr = img.devicePixelRatio()
+        top = QtGui.QColor(img.pixel(int(card.width() / 2 * dpr), int(8 * dpr)))
+        low = QtGui.QColor(img.pixel(int((card.width() - 10) * dpr), int(by * dpr)))
+        return top.lightness(), low.lightness()
+
+    rest = pixels()
+    enter(card)
+    lit = pixels()
+    check(card.glow == 1.0 and lit[0] > rest[0],
+          "a hovered card brightens across its top",
+          f"glow {card.glow}, top lightness {rest[0]} -> {lit[0]}")
+    check(lit[1] == rest[1], "and not beside its buttons",
+          f"lightness {rest[1]} -> {lit[1]}")
+    reach = ui.HoverCard.SHEEN_REACH
+    ui.HoverCard.SHEEN_REACH = 1.0
+    card.repaint()
+    full = pixels()
+    ui.HoverCard.SHEEN_REACH = reach
+    check(full[1] != rest[1], "CONTROL: a sheen down the whole card does reach them",
+          f"lightness {rest[1]} -> {full[1]}")
+    leave(card)
+    pump(app, 0.3)
+    check(card.glow == 0.0 and pixels() == rest, "and settles back when the pointer leaves",
+          f"glow {card.glow}")
 
 
 def settings_rows(app, win) -> None:
@@ -1039,6 +1130,7 @@ def main() -> int:
     shout.cues.close()
 
     home_rows(app, win, recent)
+    hover_rows(app, win)
     settings_rows(app, win)
 
     # -- the recent dictations page -------------------------------------------
