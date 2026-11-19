@@ -66,6 +66,13 @@ class Config:
     # Written by the Orb page of the Shout window, and followed live.
     orb_tune: dict = field(default_factory=dict)
 
+    # --- your words (shout.words) ---
+    # Names and terms Whisper should listen for, oldest first. Written by the
+    # Words page and by Fix on the Recent page, and followed live.
+    words: list = field(default_factory=list)
+    # What Whisper heard -> what to write instead, whole words only.
+    replacements: dict = field(default_factory=dict)
+
     # --- diagnostics ---
     log_level: str = "INFO"
 

@@ -17,6 +17,7 @@ import numpy as np
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # unauthenticated Hub calls hang on backoff
 
 from . import cuda_dlls, questions
+from .words import Vocab
 
 _CUDA_DIRS = cuda_dlls.enable()
 
@@ -182,7 +183,7 @@ class Transcriber:
         log.info("model loaded in %.2fs (%s, %s)", dt, self.cfg.model, self.cfg.compute_type)
         return dt
 
-    def warmup(self) -> float:
+    def warmup(self, vocab: Vocab = Vocab()) -> float:
         """The first GPU op in a process costs ~20s while CUDA builds kernels. Pay
         it here, in the background, instead of on the first thing the user dictates.
 
@@ -193,7 +194,9 @@ class Transcriber:
         supposed to prevent.
 
         Uses the JFK reference clip when present, so warmup doubles as a
-        correctness check against a known-good transcript.
+        correctness check against a known-good transcript. Takes the word list
+        for the same reason: with words, production also runs word timestamps,
+        which is another first call.
         """
         jfk = ROOT / "audio" / "jfk.wav"
         if jfk.exists():
@@ -203,16 +206,17 @@ class Transcriber:
             audio = (rng.standard_normal(SAMPLE_RATE) * 0.01).astype(np.float32)
 
         t0 = time.perf_counter()
-        text = self.transcribe(audio)
+        text = self.transcribe(audio, vocab)
         dt = time.perf_counter() - t0
         self.ready = True
         log.info("warmup %.2fs -> %r", dt, text[:60])
         return dt
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, vocab: Vocab = Vocab()) -> str:
         if self.model is None:
             raise RuntimeError("transcribe() before load()")
         t0 = time.perf_counter()
+        hint = vocab.hint()
         segments, _ = self.model.transcribe(
             audio,
             beam_size=self.cfg.beam_size,
@@ -224,9 +228,16 @@ class Transcriber:
             # prompt of short punctuated sentences tips it back. Applies to
             # the first 30s window only (the reset above). See CLAUDE.md.
             initial_prompt=PUNCTUATION_PROMPT,
+            # Your words, in every window. With them, Whisper can write a
+            # whole window as one segment and faster-whisper then resumes at
+            # 30s, skipping whatever it had not written yet; word timestamps
+            # make it resume at the last word instead. See shout/words.py.
+            hotwords=hint,
+            word_timestamps=hint is not None,
         )
         segs = list(segments)
         text, dropped, tail = assemble(segs)
+        text, fixed = vocab.apply(text)
         text, asked = questions.punctuate(text)
         # Numbers only, never the words. These are what a confidence-based
         # filter would have to be tuned on, so they are recorded now rather
@@ -245,6 +256,9 @@ class Transcriber:
             log.info("dropped trailing boilerplate, pattern #%d", i)
         if asked:
             log.info("question marks added: %s", ", ".join(asked))
+        if hint or fixed:
+            log.info("your words: %d heard (%d chars), %d fixes made",
+                     len(vocab.heard()), len(hint or ""), fixed)
         log.info("transcribed %.1fs of audio in %.2fs -> %d chars",
                  len(audio) / SAMPLE_RATE, time.perf_counter() - t0, len(text))
         return text

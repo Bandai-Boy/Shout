@@ -30,6 +30,7 @@ GATES = [
     ("instance", ROOT / "harness" / "probe_instance.py"),
     ("tail", ROOT / "harness" / "probe_tail.py"),
     ("questions", ROOT / "harness" / "probe_questions.py"),
+    ("words", ROOT / "harness" / "probe_words.py"),
     ("hook", ROOT / "harness" / "probe_hook.py"),
     ("inject", ROOT / "harness" / "probe_inject.py"),
     ("stuck", ROOT / "harness" / "probe_stuck.py"),

@@ -235,7 +235,7 @@ def main() -> int:
             def held(text: str) -> SimpleNamespace:
                 """A transcriber that stays busy until the probe releases it, so
                 the pill can be looked at while the commit is still in flight."""
-                def transcribe(audio) -> str:
+                def transcribe(audio, vocab=None) -> str:
                     entered.set()
                     release.wait(5)
                     return text
@@ -319,7 +319,7 @@ def main() -> int:
                 raise OSError("simulated paste failure")
 
             inj.inject = broken
-            app.transcriber = SimpleNamespace(transcribe=lambda audio: "zebra quartz umbrella")
+            app.transcriber = SimpleNamespace(transcribe=lambda audio, vocab=None: "zebra quartz umbrella")
             logging.disable(logging.CRITICAL)       # the traceback is expected
             try:
                 app._queue_commit([0.0] * 16000)
@@ -362,7 +362,7 @@ def main() -> int:
             shout_main.foreground = lambda: window[0]
 
             def dictate(words: str) -> str:
-                app.transcriber = SimpleNamespace(transcribe=lambda audio: words)
+                app.transcriber = SimpleNamespace(transcribe=lambda audio, vocab=None: words)
                 app._queue_commit([0.0] * 16000)
                 app.commits.submit(lambda: None).result(timeout=5)
                 return pasted[-1][0]
@@ -422,7 +422,8 @@ def main() -> int:
     # real question about the app. Through the real menu actions, on the GUI
     # thread, the way a click delivers them.
     labels = [a.text() for a in app.tray._menu.actions() if not a.isSeparator()]
-    check(labels == ["Recent dictations...", "Cue sounds...", "Orb look...", "Appearance",
+    check(labels == ["Recent dictations...", "Words...", "Cue sounds...", "Orb look...",
+                     "Appearance",
                      "Quit Shout"],
           "the tray menu opens each page of the window, picks a look, and quits",
           f"menu={labels}")

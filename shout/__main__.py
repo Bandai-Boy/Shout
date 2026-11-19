@@ -43,6 +43,7 @@ from .recent import Recent
 from .tray import Tray
 from .watchdog import Watchdog
 from .window import Window, application
+from .words import Vocab
 from .winapi import user32
 
 
@@ -103,6 +104,9 @@ class Shout:
         self._cue_settings = (voice, float(cfg.cue_volume))
         self._config_stamp: int | None = None
         self._config_timer: QtCore.QTimer | None = None
+        # Your words. Replaced whole by _follow_config and read once per
+        # dictation by the commit thread, so neither side needs a lock.
+        self.vocab = Vocab.resolve(cfg.words, cfg.replacements)
         self.gestures = Gestures(cfg.tap_max_ms, cfg.latch_window_ms,
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)
@@ -152,7 +156,7 @@ class Shout:
                 from .transcribe import Transcriber  # imported late: pulls in CUDA
                 self.transcriber = Transcriber(self.cfg)
                 self.transcriber.load()
-                self.transcriber.warmup()
+                self.transcriber.warmup(self.vocab)
             except FileNotFoundError:
                 # huggingface_hub's LocalEntryNotFoundError: the model was never
                 # downloaded. Shout runs offline and cannot fetch it, so say how to.
@@ -260,7 +264,7 @@ class Shout:
     def watch_config(self) -> None:
         """Follow the cue settings in config.json while running, so a voice saved
         in the cue lab plays from the next chord rather than the next launch.
-        Only the cue keys and the overlay's look and orb tune: the rest of the
+        Only the cue keys, the overlay's look and orb tune, and your words: the rest of the
         file (the model, the mic mode) cannot change under a live process
         without a restart anyway."""
         self._config_timer = QtCore.QTimer()
@@ -284,6 +288,11 @@ class Shout:
             return
         first_look = self._config_stamp is None
         self._config_stamp = stamp
+        vocab = Vocab.resolve(cfg.words, cfg.replacements)
+        if vocab != self.vocab:
+            self.vocab = vocab
+            log.info("config.json changed; %d words, %d fixes",
+                     len(vocab.words), len(vocab.fixes))
         if cfg.overlay_style != self._style_setting:
             self._style_setting = cfg.overlay_style
             self.overlay.set_style(cfg.overlay_style)
@@ -320,7 +329,7 @@ class Shout:
             if not self.ready.wait(timeout=60):
                 self.tray.notify("Model is still loading — clip dropped")
                 return
-            text = self.transcriber.transcribe(audio)
+            text = self.transcriber.transcribe(audio, self.vocab)
             if not text:
                 log.info("empty transcript, nothing to inject")
                 return

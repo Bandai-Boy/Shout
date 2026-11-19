@@ -281,6 +281,47 @@ resets the prompt), and `warmup()` exercises it since it calls `transcribe()`.
 every pattern to be exercised by a case — exact, not a floor, because a floor
 let 8 of 13 patterns ship untested on its first run. It needs no GPU.
 
+## Your words
+
+`shout/words.py`, edited from the **Words** page and from **Fix** on each
+recent dictation (select the misheard word, Fix, type what you meant). Two
+config keys: `words` (names to listen for) and `replacements` (heard -> write,
+whole words, one pass, longest first). A fix whose replacement has a capital in
+it is also added to `words`; a lowercase one is style, not hearing, and is not.
+Both are followed live by `_follow_config`, and the Shout process passes its
+current `Vocab` into every `transcribe()` call and into `warmup()`.
+
+`words` go to faster-whisper as `hotwords`, which, unlike `initial_prompt`,
+reaches EVERY 30s window. Measured 19 Nov 2026 on Windows-TTS clips of card and
+tool names: 13 of 36 right with no words, 30 of 36 with them. Three things
+about how they are sent are load-bearing, each measured:
+
+- **Hints need `word_timestamps=True`.** With hotwords, Whisper wrote a whole
+  30s window as ONE segment with no inner timestamps, so faster-whisper resumed
+  at the 30s mark and the ~3s it had not written yet was never transcribed (9
+  words lost on a 32s clip, 0.977 -> 0.907 of the script). Word timestamps make
+  it resume at the last word written. It is on only when there are hints, so an
+  empty list decodes byte-for-byte as before. `probe_words`' control is the
+  production call with it forced off, which must lose those words.
+- **Short sentences, not a comma list.** The comma list cost the final full
+  stop on two clips; ". " between words did not (44 sentence ends either way).
+- **A 250-character budget, newest first.** 18 names in 210 chars scored 16 of
+  18; the same plus 60 more (956 chars) scored 13. The page shows the room left
+  and marks a word that no longer fits.
+
+Not measured, and worth knowing: whether the no-hint path ALSO loses words at
+a window boundary in real use. The mode switch is not hotword-specific in
+principle, and `shout.log` cannot answer it, because its timestamps are mapped
+back over cut silences, so a long pause looks like a full window.
+
+Fresh-eyes review (19 Nov) found four ways the first version lost a fix, all now gate rows: a drag-selection carries punctuation (`Pikachu,`), so every term goes through `_clean`, which also drops end punctuation, and Remove compares cleaned, case-folded forms or it cannot find what Save stored; `re.IGNORECASE` matches letters whose casefold is no table key (a standalone Turkish dotted I), and the old `table[...]` raised there and lost the whole dictation, so a miss now leaves the text as heard; and Recent shows text AFTER the fixes, so fixing a word an earlier fix wrote re-points that earlier fix (one pass would never fire the new one). Words added while Shout runs were never warmed for word timestamps: measured +15ms on the first such dictation, so left alone.
+
+The README promise is now "what you dictate is never written to disk": the
+words and fixes you save are, because you asked, and `shout.log` records only
+their counts. **Re-run `harness/probe_words.py` after touching `words.py`, the
+`hotwords`/`word_timestamps` arguments, or `PUNCTUATION_PROMPT`.** It needs the
+GPU and about a minute, synthesizes no keys, and is safe while Shout runs.
+
 ## Commit guard
 
 `hooks/pre-commit` refuses to commit recordings, transcript-shaped files, or any

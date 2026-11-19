@@ -5,7 +5,8 @@
 ![The Shout pill in its four states: an idle sliver, recording, hands-free and transcribing](assets/pill-states.png)
 
 - **Fast.** Measured from letting go of the keys to text on screen: about 0.2 s for a sentence, 0.4 s for a long paragraph, and under a second for a full minute of speech (RTX 5070).
-- **Private.** No cloud, no account, and no network at all once it's installed. Your words are never written to disk.
+- **Private.** No cloud, no account, and no network at all once it's installed. What you dictate is never written to disk.
+- **Learns your words.** Teach it the names it gets wrong (cards, sets, people, products) and fix a misheard word once: it's right from the next dictation on.
 - **Works everywhere.** It pastes, so it works in any app that takes text, and it puts your clipboard back afterwards.
 - **Hands-free when you want it.** Double-tap the keys and keep talking without holding anything.
 - **Quiet.** A sliver of a pill above the taskbar shows what it's doing, and short audio cues confirm start and stop. You can design your own cues.
@@ -46,6 +47,7 @@ Start **Shout** from the Start menu. A tray icon appears, and a pill sits above 
 | Dictate hands-free | **Double-tap Ctrl+Win**. The pill turns amber and says *Hands-free*. Tap **Ctrl+Win** once to finish. |
 | Cancel | While holding Ctrl+Win, press any other key. The recording is thrown away, and Windows still gets its shortcut, so Ctrl+Win+D and the rest keep working. |
 | Get back a dictation that didn't paste | **Left-click the tray icon** to copy your last dictation, then click where it goes and press Ctrl+V. For older ones, right-click the tray icon and choose **Recent dictations...** |
+| Teach it a word | On **Recent dictations...**, select the word Shout got wrong, press **Fix**, type what you meant, and press **Save fix**. From then on Shout writes it your way, and if it's a name (it has a capital letter) Shout also listens for it. Right-click the tray icon and choose **Words...** to add names before Shout ever gets them wrong, or to remove one. |
 | Change the sounds | Right-click the tray icon and choose **Cue sounds...** |
 | Change the look | Right-click the tray icon and choose **Appearance**, then **Pill** or **Orb**. The orb rests as a small glass capsule and swells into a glowing ring whose crests move with your voice. To adjust the orb (its waves, turbulence, spin, size and colour), choose **Orb look...**, watch the preview, and press **Save to config**. The **On screen** switch on that page also picks between the pill and the orb. |
 | Quit | Right-click the tray icon and choose **Quit Shout**. |
@@ -54,7 +56,7 @@ A recording finishes and transcribes on its own after 2 minutes of holding, or 1
 
 ## Settings
 
-Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates the file the first time you save a sound; otherwise, create it yourself. Any key you leave out keeps its default. Quit and restart Shout after editing. Sounds saved on the Cue sounds page, and the orb's look saved on the Orb page, are the exceptions: they apply without a restart.
+Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates the file the first time you save a sound; otherwise, create it yourself. Any key you leave out keeps its default. Quit and restart Shout after editing. Sounds saved on the Cue sounds page, the orb's look saved on the Orb page, and your words are the exceptions: they apply without a restart.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -68,6 +70,8 @@ Settings live in `%APPDATA%\Shout\config.json`. The **Cue sounds** page creates 
 | `overlay` | `true` | Shows the pill. |
 | `overlay_style` | `"pill"` | `"pill"` or `"orb"`. Takes effect without a restart. |
 | `orb_tune` | `{}` | The orb's look, as the settings you changed on the Orb page. Takes effect without a restart. |
+| `words` | `[]` | Names Shout listens for, oldest first. About 250 characters' worth are used, newest first; the Words page shows how much room is left. Takes effect without a restart. |
+| `replacements` | `{}` | What Shout heard mapped to what to write instead, as whole words: `{"tseg player": "TCGplayer"}`. Takes effect without a restart. |
 | `ptt_ceiling_s`, `latch_ceiling_s` | `120`, `600` | The automatic stop limits, in seconds. |
 | `tap_max_ms`, `latch_window_ms` | `300`, `350` | How short a press counts as a tap, and how quickly the second tap of a double-tap must follow. |
 
@@ -84,6 +88,7 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 | **Keystrokes** | One synthetic Ctrl+V per dictation, sent only after you've let go of Ctrl+Win. |
 | **Network** | None while running. Shout loads the model with `HF_HUB_OFFLINE=1` and `local_files_only=True`, and the installer's model download is the only network access. To check for yourself, `git grep -n -E "(import\|from) (requests\|urllib\|http\|socket\|httpx)" -- shout/` finds nothing. |
 | **Disk** | `%APPDATA%\Shout\config.json`, plus `shout.log`, which records timings, character counts, device names and the model's own per-segment confidence numbers, but never your words. |
+| **Your words** | The names you add on the Words page, and each fix you save (the word Shout heard and the word you meant), are kept in `config.json`, because you asked for them to be remembered. Nothing else from a dictation is. `shout.log` records only how many words and fixes were used. |
 | **Startup** | Only if you installed with `-Autostart`. |
 
 ## Known limitations

@@ -110,7 +110,7 @@ from pathlib import Path
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import orb
+from . import orb, words
 from .config import Config, config_dir, merge
 from .cues import MAX_GESTURE_S, PRESETS, Cues, Voice, build, duration_s, notes
 from .inject import set_clipboard_text
@@ -1440,7 +1440,7 @@ class EntryRow(QtWidgets.QFrame):
 
     SHOWN_CHARS = 280
 
-    def __init__(self, entry: Entry, on_copy) -> None:
+    def __init__(self, entry: Entry, on_copy, on_fix=None) -> None:
         super().__init__()
         self.setObjectName("entry")
         self.entry = entry
@@ -1468,7 +1468,100 @@ class EntryRow(QtWidgets.QFrame):
         self.copy.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.copy.setAccessibleName("Copy this dictation")
         self.copy.clicked.connect(lambda _=False: on_copy(entry))
-        row.addWidget(self.copy, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        buttons = QtWidgets.QVBoxLayout()
+        buttons.setSpacing(6)
+        buttons.addWidget(self.copy)
+        self.fix = QtWidgets.QPushButton("Fix")
+        self.fix.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.fix.setAccessibleName("Fix a word Shout got wrong")
+        self.fix.setToolTip("Select the wrong word first, then Fix")
+        # The selection says which word is wrong, so a click leaves focus on
+        # the text. Belt and braces: probe_lab's offscreen window could not show
+        # a focus-taking button losing it.
+        self.fix.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        if on_fix is not None:
+            self.fix.clicked.connect(
+                lambda _=False: on_fix(self.text.selectedText().strip()))
+        buttons.addWidget(self.fix)
+        buttons.addStretch(1)
+        row.addLayout(buttons)
+
+
+class FixBar(QtWidgets.QFrame):
+    """Shout wrote X; you meant Y. Saved as a fix, and Y is listened for too
+    when it looks like a name. See shout/words.py."""
+
+    def __init__(self, on_done) -> None:
+        super().__init__()
+        self.setObjectName("entry")
+        self.on_done = on_done
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(14, 10, 10, 10)
+        box.setSpacing(8)
+        title = QtWidgets.QLabel("Fix a word. Shout makes this fix from your "
+                                 "next dictation on.")
+        title.setObjectName("sub")
+        title.setFont(tracked(8.5))
+        title.setWordWrap(True)
+        box.addWidget(title)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        self.heard = QtWidgets.QLineEdit()
+        self.heard.setPlaceholderText("Shout wrote")
+        self.heard.setAccessibleName("What Shout wrote")
+        self.write = QtWidgets.QLineEdit()
+        self.write.setPlaceholderText("You meant")
+        self.write.setAccessibleName("What you meant")
+        arrow = QtWidgets.QLabel("→")
+        arrow.setObjectName("sub")
+        row.addWidget(self.heard, 1)
+        row.addWidget(arrow)
+        row.addWidget(self.write, 1)
+        box.addLayout(row)
+        actions = QtWidgets.QHBoxLayout()
+        actions.addStretch(1)
+        self.cancel = QtWidgets.QPushButton("Cancel")
+        self.cancel.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.cancel.clicked.connect(lambda: self.close_bar(""))
+        self.save = QtWidgets.QPushButton("Save fix")
+        self.save.setObjectName("cta")
+        self.save.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.save.clicked.connect(self._save)
+        self.write.returnPressed.connect(self._save)
+        self.heard.textChanged.connect(self._sync)
+        self.write.textChanged.connect(self._sync)
+        actions.addWidget(self.cancel)
+        actions.addWidget(self.save)
+        box.addLayout(actions)
+        self._sync()
+        self.hide()
+
+    def open(self, heard: str) -> None:
+        self.heard.setText(heard)
+        self.write.setText("")
+        self.show()
+        (self.write if heard else self.heard).setFocus()
+
+    def _sync(self) -> None:
+        heard, write = words._clean(self.heard.text()), words._clean(self.write.text())
+        self.save.setEnabled(bool(heard and write and heard != write))
+
+    def _save(self) -> None:
+        if not self.save.isEnabled():
+            return
+        heard, write = words._clean(self.heard.text()), words._clean(self.write.text())
+        try:
+            listened = words.add_fix(heard, write)
+        except (OSError, ValueError):
+            # The bar stays open with what you typed, so trying again is one click.
+            self.on_done("Could not read config.json just now. Try again.")
+            return
+        self.close_bar(f"Saved. Shout now writes {write!r} where it heard "
+                       f"{heard!r}" + (", and listens for it." if listened else "."))
+
+    def close_bar(self, message: str) -> None:
+        self.hide()
+        self.on_done(message)
 
 
 class RecentPage(QtWidgets.QWidget):
@@ -1524,6 +1617,9 @@ class RecentPage(QtWidgets.QWidget):
         body.setAutoFillBackground(False)
         card.box.addWidget(self.scroll, 1)
 
+        self.fix_bar = FixBar(self._fixed)
+        card.box.addWidget(self.fix_bar)
+
         self.status = QtWidgets.QLabel("")
         self.status.setObjectName("status")
         self.status.setFont(tracked(8.5))
@@ -1536,6 +1632,15 @@ class RecentPage(QtWidgets.QWidget):
         self._timer.timeout.connect(self.refresh)
         self._timer.start(self.POLL_MS)
         self.refresh()
+
+    def _fix(self, selected: str) -> None:
+        self.status.setText("" if selected else
+                            "Type what Shout wrote, or select it in the "
+                            "dictation before pressing Fix.")
+        self.fix_bar.open(selected)
+
+    def _fixed(self, message: str) -> None:
+        self.status.setText(message)
 
     def refresh(self) -> None:
         version = self.recent.version
@@ -1552,7 +1657,7 @@ class RecentPage(QtWidgets.QWidget):
                 # still paints where it was.
                 widget.hide()
                 widget.deleteLater()
-        self.shown = [EntryRow(entry, self._copy) for entry in entries]
+        self.shown = [EntryRow(entry, self._copy, self._fix) for entry in entries]
         for row in self.shown:
             self.rows.addWidget(row)
         self.rows.addStretch(1)
@@ -1571,12 +1676,205 @@ class RecentPage(QtWidgets.QWidget):
         self.status.setText("Cleared.")
 
 
+class ListRow(QtWidgets.QFrame):
+    """One word or one fix, with Remove."""
+
+    def __init__(self, text: str, on_remove, what: str) -> None:
+        super().__init__()
+        self.setObjectName("entry")
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(14, 6, 6, 6)
+        row.setSpacing(10)
+        self.label = QtWidgets.QLabel(text)
+        self.label.setFont(tracked(9.5))
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        row.addWidget(self.label, 1)
+        self.remove = QtWidgets.QPushButton("Remove")
+        self.remove.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.remove.setAccessibleName(f"Remove {what}")
+        self.remove.clicked.connect(lambda _=False: on_remove())
+        row.addWidget(self.remove)
+
+
+class WordsPage(QtWidgets.QWidget):
+    """Your words: what Shout listens for, and what it always fixes. Reads
+    config.json on every refresh, never from a snapshot, because Fix on the
+    Recent page writes the same keys."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+        subtitle = QtWidgets.QLabel("Names and terms Shout should know. Used from "
+                                    "your next dictation, and kept in config.json "
+                                    "on this PC.")
+        subtitle.setObjectName("sub")
+        subtitle.setFont(tracked(8.5))
+        subtitle.setWordWrap(True)
+        outer.addWidget(subtitle)
+
+        listen = Card()
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(section("Listen for"))
+        head.addStretch(1)
+        self.budget = QtWidgets.QLabel("")
+        self.budget.setObjectName("sub")
+        self.budget.setFont(tracked(8))
+        head.addWidget(self.budget)
+        listen.box.addLayout(head)
+        add = QtWidgets.QHBoxLayout()
+        add.setSpacing(8)
+        self.word = QtWidgets.QLineEdit()
+        self.word.setPlaceholderText("A name, a set, a product")
+        self.word.setAccessibleName("Word to listen for")
+        self.word.returnPressed.connect(self._add_word)
+        self.add_word = QtWidgets.QPushButton("Add")
+        self.add_word.setObjectName("cta")
+        self.add_word.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.add_word.clicked.connect(self._add_word)
+        add.addWidget(self.word, 1)
+        add.addWidget(self.add_word)
+        listen.box.addLayout(add)
+        self.word_rows, word_scroll = self._list()
+        listen.box.addWidget(word_scroll, 1)
+        outer.addWidget(listen, 1)
+
+        fixes = Card()
+        fixes.box.addWidget(section("Always replace"))
+        add = QtWidgets.QHBoxLayout()
+        add.setSpacing(8)
+        self.heard = QtWidgets.QLineEdit()
+        self.heard.setPlaceholderText("Shout writes")
+        self.heard.setAccessibleName("What Shout writes")
+        self.write = QtWidgets.QLineEdit()
+        self.write.setPlaceholderText("You meant")
+        self.write.setAccessibleName("What you meant")
+        self.write.returnPressed.connect(self._add_fix)
+        arrow = QtWidgets.QLabel("→")
+        arrow.setObjectName("sub")
+        self.add_fix = QtWidgets.QPushButton("Add")
+        self.add_fix.setObjectName("cta")
+        self.add_fix.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.add_fix.clicked.connect(self._add_fix)
+        add.addWidget(self.heard, 1)
+        add.addWidget(arrow)
+        add.addWidget(self.write, 1)
+        add.addWidget(self.add_fix)
+        fixes.box.addLayout(add)
+        self.fix_rows, fix_scroll = self._list()
+        fixes.box.addWidget(fix_scroll, 1)
+        outer.addWidget(fixes, 1)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setObjectName("status")
+        self.status.setFont(tracked(8.5))
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(30)
+        outer.addWidget(self.status)
+        self.refresh()
+
+    @staticmethod
+    def _list() -> tuple[QtWidgets.QVBoxLayout, QtWidgets.QScrollArea]:
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumHeight(90)
+        body = QtWidgets.QWidget()
+        rows = QtWidgets.QVBoxLayout(body)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(6)
+        scroll.setWidget(body)
+        scroll.viewport().setAutoFillBackground(False)
+        body.setAutoFillBackground(False)
+        return rows, scroll
+
+    @staticmethod
+    def _fill(rows: QtWidgets.QVBoxLayout, widgets: list, empty: str) -> None:
+        while rows.count():
+            item = rows.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+        if not widgets:
+            note = QtWidgets.QLabel(empty)
+            note.setObjectName("sub")
+            note.setFont(tracked(9))
+            note.setWordWrap(True)
+            widgets = [note]
+        for w in widgets:
+            rows.addWidget(w)
+        rows.addStretch(1)
+
+    def refresh(self) -> None:
+        try:
+            listed, reps = words.stored()
+        except (OSError, ValueError):
+            self.status.setText("Could not read config.json just now. Reopen the "
+                                "window to try again.")
+            return
+        vocab = words.Vocab.resolve(listed, reps)
+        heard = set(vocab.heard())
+        hint = vocab.hint() or ""
+        self.budget.setText(f"{len(hint)} of {words.HINT_BUDGET} characters")
+        self.word_rows_shown = [
+            ListRow(w if w in heard else f"{w}   (no room: not listened for)",
+                    lambda w=w: self._remove_word(w), f"the word {w}")
+            for w in reversed(vocab.words)]
+        self._fill(self.word_rows, self.word_rows_shown,
+                   "None yet. Add the names Shout gets wrong: cards, sets, "
+                   "people, products.")
+        self.fix_rows_shown = [
+            ListRow(f"{h}  →  {w}", lambda h=h: self._remove_fix(h),
+                    f"the fix for {h}")
+            for h, w in reversed(vocab.fixes)]
+        self._fill(self.fix_rows, self.fix_rows_shown,
+                   "None yet. Use Fix on a recent dictation, or add one here.")
+
+    def _act(self, change, done: str) -> bool:
+        try:
+            change()
+        except (OSError, ValueError):
+            self.status.setText("Could not read config.json just now. Try again.")
+            return False
+        self.status.setText(done)
+        self.refresh()
+        return True
+
+    def _add_word(self) -> None:
+        word = words._clean(self.word.text())
+        if not word:
+            return
+        if self._act(lambda: words.add_word(word), f"Listening for {word!r}."):
+            self.word.clear()
+
+    def _remove_word(self, word: str) -> None:
+        self._act(lambda: words.remove_word(word), f"Removed {word!r}.")
+
+    def _add_fix(self) -> None:
+        heard, write = words._clean(self.heard.text()), words._clean(self.write.text())
+        if not heard or not write or heard == write:
+            self.status.setText("Fill in both sides: what Shout writes, and what "
+                                "you meant.")
+            return
+        if self._act(lambda: words.add_fix(heard, write),
+                     f"Shout now writes {write!r} where it hears {heard!r}."):
+            self.heard.clear()
+            self.write.clear()
+
+    def _remove_fix(self, heard: str) -> None:
+        self._act(lambda: words.remove_fix(heard), f"Removed the fix for {heard!r}.")
+
+
 class Window(QtWidgets.QWidget):
     """Both pages, switched at the top. Shout builds a fresh one each time it is
     opened after being closed, so the sounds page reads config.json as it is
     now, not as it was the first time."""
 
-    PAGES = ("recent", "sounds", "orb")
+    PAGES = ("recent", "words", "sounds", "orb")
 
     def __init__(self, recent: Recent, page: str = "recent") -> None:
         super().__init__()
@@ -1593,7 +1891,8 @@ class Window(QtWidgets.QWidget):
         segs.setSpacing(2)
         group = QtWidgets.QButtonGroup(self)
         self.tabs: dict[str, QtWidgets.QPushButton] = {}
-        for key, text in zip(self.PAGES, ("Recent dictations", "Cue sounds", "Orb")):
+        for key, text in zip(self.PAGES, ("Recent dictations", "Words", "Cue sounds",
+                                          "Orb")):
             tab = QtWidgets.QPushButton(text)
             tab.setObjectName("seg")
             tab.setCheckable(True)
@@ -1611,10 +1910,11 @@ class Window(QtWidgets.QWidget):
         outer.addLayout(top)
 
         self.recent_page = RecentPage(recent)
+        self.words_page = WordsPage()
         self.lab = Lab()
         self.orb_page = OrbPage()
-        self.pages = {"recent": self.recent_page, "sounds": self.lab,
-                      "orb": self.orb_page}
+        self.pages = {"recent": self.recent_page, "words": self.words_page,
+                      "sounds": self.lab, "orb": self.orb_page}
         self.stack = QtWidgets.QStackedWidget()
         for widget in self.pages.values():
             self.stack.addWidget(widget)
@@ -1630,6 +1930,8 @@ class Window(QtWidgets.QWidget):
         self.resize(600, self.sizeHint().height())
 
     def show_page(self, key: str) -> None:
+        if key == "words":
+            self.words_page.refresh()     # Fix on the Recent page writes it too
         self.stack.setCurrentWidget(self.pages[key])
         self.tabs[key].setChecked(True)
 

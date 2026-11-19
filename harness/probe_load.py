@@ -87,7 +87,8 @@ def child(spec: dict) -> dict:
             records.append(record)
 
     logging.getLogger().addHandler(Capture(logging.WARNING))
-    stub = SimpleNamespace(cfg=Config.load(), transcriber=None,
+    from shout.words import Vocab
+    stub = SimpleNamespace(cfg=Config.load(), transcriber=None, vocab=Vocab(),
                            ready=threading.Event(), _stopping=False)
     notices, states = [], []
     stub.tray = SimpleNamespace(notify=notices.append)

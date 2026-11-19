@@ -81,7 +81,7 @@ from shout import window as ui  # noqa: E402
 from shout.__main__ import CONFIG_POLL_MS, Shout  # noqa: E402
 from shout.config import Config  # noqa: E402
 from shout.cues import PRESETS, Voice  # noqa: E402
-from shout.recent import SIZE, Recent  # noqa: E402
+from shout.recent import SIZE, Entry, Recent  # noqa: E402
 
 inj.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
 
@@ -641,6 +641,90 @@ def main() -> int:
           f"after {took * 1000:.0f}ms" if took is not None else "switch still on pill")
     looks["pill"].click()
     pump(app, 3.0, lambda: shout.overlay.style == "pill")
+    # -- your words: Fix on a recent dictation, through to the running app -----
+    # The same keys the Words page writes, so the page is driven here too, and
+    # the running app must follow both without a restart.
+    others = {k: v for k, v in read_config().items() if k not in ("words", "replacements")}
+    picked: list[str] = []
+    row = ui.EntryRow(Entry(time.time(), "we count the cache tonight"),
+                      lambda _e: None, picked.append)
+    holder = QtWidgets.QWidget()
+    box = QtWidgets.QVBoxLayout(holder)
+    box.addWidget(row)
+    holder.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    holder.show()
+    app.processEvents()
+
+    def click(button) -> None:
+        mouse(button, E.MouseButtonPress, button.width() / 2, LEFT, LEFT)
+        mouse(button, E.MouseButtonRelease, button.width() / 2, LEFT, NOBUTTON)
+        app.processEvents()
+
+    def select_cache() -> None:
+        row.text.setFocus()
+        row.text.setSelection(13, 5)
+        app.processEvents()
+
+    select_cache()
+    check(row.text.selectedText() == "cache", "precondition: the word is selected",
+          repr(row.text.selectedText()))
+    click(row.fix)
+    check(picked == ["cache"],
+          "Fix hands over the word selected in the dictation, after a real click",
+          f"got {picked}")
+    holder.close()
+
+    bar = win.recent_page.fix_bar
+    bar.open("cache")
+    bar.write.setText("cash")
+    bar.save.click()
+    took = pump(app, 3.0, lambda: shout.vocab.apply("count the cache")[0] == "count the cash")
+    check(read_config().get("replacements") == {"cache": "cash"}
+          and read_config().get("words", []) == [] and took is not None,
+          "Save fix reaches a RUNNING app, and a lowercase fix is not listened for",
+          f"file {read_config().get('replacements')} words {read_config().get('words')}")
+    bar.open("tseg player")
+    bar.write.setText("TCGplayer")
+    bar.save.click()
+    took = pump(app, 3.0, lambda: "TCGplayer" in shout.vocab.heard())
+    check(took is not None and read_config().get("words") == ["TCGplayer"],
+          "a fix to a name is listened for too, from the next dictation",
+          f"words {read_config().get('words')}")
+    check(not bar.isVisible() and "TCGplayer" in win.recent_page.status.text(),
+          "the bar closes and says what was saved", win.recent_page.status.text())
+
+    page = win.words_page
+    win.show_page("words")
+    app.processEvents()
+    check(len(page.word_rows_shown) == 1 and len(page.fix_rows_shown) == 2
+          and page.budget.text().startswith("10 of "),
+          "the Words page lists what Fix saved, without being reopened",
+          f"{len(page.word_rows_shown)} words, {len(page.fix_rows_shown)} fixes, "
+          f"{page.budget.text()!r}")
+    page.word.setText("Ogerpon")
+    page.add_word.click()
+    page.fix_rows_shown[0].remove.click()          # newest first: tseg player
+    took = pump(app, 3.0, lambda: len(shout.vocab.fixes) == 1
+                and shout.vocab.words == ("TCGplayer", "Ogerpon"))
+    check(took is not None and read_config().get("replacements") == {"cache": "cash"},
+          "adding a word and removing a fix on the page reach the running app",
+          f"app words {shout.vocab.words}, fixes {shout.vocab.fixes}")
+    check({k: v for k, v in read_config().items() if k not in ("words", "replacements")}
+          == others, "and no other key in the file moved")
+    good = CONFIG.read_text(encoding="utf-8")
+    CONFIG.write_text("{", encoding="utf-8")           # caught mid-write
+    page.word.setText("Enel")
+    page.add_word.click()
+    check(CONFIG.read_text(encoding="utf-8") == "{"
+          and "Could not read" in page.status.text(),
+          "a half-written file is never saved over with empty lists",
+          page.status.text())
+    CONFIG.write_text(good, encoding="utf-8")
+    write_config(read_config() | {"words": [], "replacements": {}})
+    pump(app, 3.0, lambda: shout.vocab.words == ())
+    win.show_page("orb")
+    app.processEvents()
+
     shout._config_timer.stop()
     shout.cues.close()
 
