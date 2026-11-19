@@ -60,7 +60,8 @@ def _prefix_claim(name: str) -> bool:
 def _beat_forever(freeze: bool = False) -> None:
     from PySide6 import QtCore
     app = QtCore.QCoreApplication([])
-    timer = instance.start_beating()  # noqa: F841
+    timer = instance.start_beating(  # noqa: F841
+        on_open=lambda: print("PROBE opened", flush=True))
     if freeze:
         def hang() -> None:
             print("PROBE freezing", flush=True)
@@ -88,6 +89,8 @@ def child(mode: str, name: str, *args: str) -> None:
             instance._ours = lambda _process: True
         claimed = _prefix_claim(name) if "prefix" in flags else instance.claim(name, wait_s)
         print(f"PROBE claimed {claimed}", flush=True)
+        if not claimed and "open" in flags:      # what main() does on --open
+            print(f"PROBE asked {instance.request_open(name)}", flush=True)
         if claimed and "stay" in flags:
             _beat_forever()
 
@@ -197,6 +200,20 @@ def main() -> int:
         check(got == "False", "a launch is refused by a healthy copy", f"claimed {got}")
         check(dt < 4.0, f"refused without waiting out the watch ({dt:.1f}s)", "")
         check(alive(holder.pid), "the healthy copy is still running")
+        # A click on the icon while Shout runs: --open asks it for its window.
+        # The plain launch above is the control (the Startup shortcut's case).
+        check(holder.expect("PROBE opened", 1.5) is None,
+              "CONTROL: a launch without --open opens no window")
+        opener = Child("launch", name, "5", "open")
+        got = opener.claimed()
+        check(got == "False", "an --open launch is refused too", f"claimed {got}")
+        check(opener.expect("PROBE asked ", 5) == "True", "and asks the running copy")
+        check(holder.expect("PROBE opened", 3) is not None,
+              "the running copy opens its window")
+        Child("launch", name, "5", "open").claimed()
+        check(holder.expect("PROBE opened", 3) is not None,
+              "and again on the next click")
+        check(alive(holder.pid), "asking leaves the running copy running")
         got = Child("launch", name, "0").claimed()
         check(got == "True", "CONTROL: a 0s watch takes over from a healthy copy",
               f"claimed {got}")

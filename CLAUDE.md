@@ -57,7 +57,12 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # sync, model, sho
 `shout/window.py` is one window with six pages, **Home**, **Recent dictations**,
 **Words**, **Cue sounds**, **Look** (the orb; page key `orb`) and **Settings**,
 picked from an icon rail on the left and opened from the tray menu (an entry
-per page; **Open Shout...** is Home). The page keys the tray and `__main__` use
+per page; **Open Shout...** is Home), or by clicking the desktop or Start menu icon.
+Those shortcuts pass `--open` and the Startup one does not, so sign-in stays
+quiet. A refused `--open` launch bumps `opens` in the heartbeat block and calls
+`AllowSetForegroundWindow` on the running pid; the running copy's beat timer sees
+the change and raises the window, keeping its page (`probe_instance` rows, with
+the plain launch as control). The page keys the tray and `__main__` use
 are `home`, `recent`, `words`, `sounds`, `orb`, `settings`, and `win.tabs` is
 still a dict of checkable buttons keyed by them. It runs INSIDE Shout's
 process, on the GUI thread; the cue lab used to be a separate `scripts/cue_lab.py`
@@ -436,7 +441,9 @@ child of the foreground process. Run from the PowerShell tool via `& python
 gates.py` the same tree reported **6/8** — the hook gate lost an assertion and
 the overlay gate reported INCONCLUSIVE because its focus-theft control could not
 demonstrate theft. Run from Bash, the identical commit reports 8/8. Nothing was
-wrong with the code either time.
+wrong with the code either time. A Bash call with `run_in_background` counts as
+detached too (19 Nov: overlay INCONCLUSIVE in the background, its focus control OK in
+the foreground), so run the suite as a foreground Bash call with a long timeout.
 
 Two consequences. A 6/8 with those specific gates failing means *check how you
 invoked it* before believing a regression. And the overlay gate failing safe —

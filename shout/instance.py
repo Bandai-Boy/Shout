@@ -67,7 +67,10 @@ _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
 
 
 class _Block(ctypes.Structure):
-    _fields_ = [("pid", ctypes.c_uint32), ("beats", ctypes.c_uint32)]
+    # opens: bumped by a launch with --open that finds this copy running (a
+    # click on the desktop icon); the running copy opens its window on change.
+    _fields_ = [("pid", ctypes.c_uint32), ("beats", ctypes.c_uint32),
+                ("opens", ctypes.c_uint32)]
 
 
 # Never closed: the mutex and the block are this process's claim for its life.
@@ -174,10 +177,32 @@ def beat() -> None:
         _block.beats += 1
 
 
-def start_beating() -> QtCore.QTimer:
-    """Beat from the GUI thread for as long as its event loop runs. Keep the
-    timer referenced."""
+def request_open(mutex_name: str = MUTEX_NAME) -> bool:
+    """From a launch the running copy refused: ask that copy to open its
+    window. This process was started by a click, so it holds the foreground
+    right, and hands it on; without that Windows only flashes the taskbar."""
+    block = open_block(mutex_name)
+    if block is None:
+        return False
+    block.opens += 1
+    ctypes.windll.user32.AllowSetForegroundWindow(block.pid)
+    return True
+
+
+def start_beating(on_open=None) -> QtCore.QTimer:
+    """Beat from the GUI thread for as long as its event loop runs, and call
+    on_open there when a launch asks for the window. Keep the timer referenced."""
     timer = QtCore.QTimer()
-    timer.timeout.connect(beat)
+    seen = _block.opens if _block is not None else 0
+
+    def tick() -> None:
+        nonlocal seen
+        beat()
+        if _block is not None and _block.opens != seen:
+            seen = _block.opens
+            if on_open is not None:
+                on_open()
+
+    timer.timeout.connect(tick)
     timer.start(BEAT_MS)
     return timer

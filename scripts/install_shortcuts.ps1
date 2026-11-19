@@ -103,17 +103,22 @@ Write-Output "verified  subsystem=2 (no console)  sys.prefix=$prefix"
 
 $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $startup = Join-Path $programs 'Startup\Shout.lnk'
-$links = @(Join-Path $programs 'Shout.lnk')
+# Link -> arguments. A click on Shout opens its window (--open), even when Shout
+# is already running; Startup starts it quietly to the tray.
+$links = [ordered]@{ (Join-Path $programs 'Shout.lnk') = '-m shout --open' }
+# A desktop shortcut you made yourself is kept and repointed, like Startup.
+$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Shout.lnk'
+if (Test-Path $desktop) { $links[$desktop] = '-m shout --open' }
 # An existing autostart entry is an earlier choice, so it is kept AND repointed:
 # this script is also the repair after a move, and a stale link starts nothing.
 $autostartOn = $Autostart -or (Test-Path $startup)
-if ($autostartOn) { $links += $startup }
+if ($autostartOn) { $links[$startup] = '-m shout' }
 
 $shell = New-Object -ComObject WScript.Shell
-foreach ($link in $links) {
+foreach ($link in $links.Keys) {
     $sc = $shell.CreateShortcut($link)
     $sc.TargetPath = $target
-    $sc.Arguments = '-m shout'
+    $sc.Arguments = $links[$link]
     $sc.WorkingDirectory = $root
     $sc.IconLocation = $ico
     $sc.Description = 'Shout - local dictation. Hold Ctrl+Win to talk.'
@@ -122,12 +127,12 @@ foreach ($link in $links) {
 }
 
 Write-Output ''
-Write-Output "target : $target -m shout"
+Write-Output "target : $target -m shout [--open]"
 Write-Output "workdir: $root"
 if ($autostartOn) {
     Write-Output "autostart: on. Shout starts with Windows; delete $startup to stop that."
 } else {
     Write-Output 'autostart: off. Re-run with -Autostart to start Shout with Windows.'
 }
-Write-Output 'A second copy exits immediately on the single-instance mutex, so'
-Write-Output 'launching Shout twice is harmless.'
+Write-Output 'A second copy exits on the single-instance mutex, so launching Shout'
+Write-Output 'twice is harmless; with --open it first asks the running one to show its window.'

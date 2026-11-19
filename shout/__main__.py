@@ -367,14 +367,15 @@ class Shout:
 
     # -- the window and the recent list --------------------------------------
 
-    def open_window(self, page: str = "home") -> None:
-        """GUI thread, from the tray menu. One window: opening it again raises
-        it and switches the page rather than stacking a second copy."""
+    def open_window(self, page: str | None = "home") -> None:
+        """GUI thread, from the tray menu or a launch with --open. One window:
+        opening it again raises it and switches the page rather than stacking
+        a second copy. page=None raises it on whatever page it shows."""
         if self.window is None or not self.window.isVisible():
             if self.window is not None:
                 self.window.deleteLater()
-            self.window = Window(self.recent, page, lambda: self.model_state)
-        else:
+            self.window = Window(self.recent, page or "home", lambda: self.model_state)
+        elif page is not None:
             self.window.show_page(page)
         if self.window.isMinimized():
             self.window.showNormal()
@@ -412,7 +413,7 @@ class Shout:
 
     # -- lifecycle ----------------------------------------------------------
 
-    def run(self, app: QtWidgets.QApplication) -> None:
+    def run(self, app: QtWidgets.QApplication, open_window: bool = False) -> None:
         self.tray.build()
         self.overlay.build()
         self.watch_config()
@@ -421,7 +422,10 @@ class Shout:
         self.hotkey.start()
         self.watchdog.start()
         log.info("hold Ctrl+Win to dictate; double-tap to latch hands-free")
-        beat = instance.start_beating()  # noqa: F841 -- kept alive for exec()
+        beat = instance.start_beating(  # noqa: F841 -- kept alive for exec()
+            on_open=lambda: self.open_window(None))
+        if open_window:
+            QtCore.QTimer.singleShot(0, lambda: self.open_window("home"))
         app.exec()           # blocks: Qt owns the main thread until quit
         # Only now is it safe to touch the widgets, whichever thread asked to quit.
         if self.window is not None:
@@ -452,7 +456,13 @@ class Shout:
 def main() -> int:
     cfg = Config.load()
     _setup_logging(cfg.log_level)
+    # --open is what the desktop and Start menu shortcuts pass; the Startup
+    # shortcut does not, so signing in never puts a window in your face.
+    open_window = "--open" in sys.argv[1:]
     if not instance.claim():
+        if open_window and instance.request_open():
+            log.info("Shout is already running; asked it to open its window")
+            return 0
         log.error("Shout is already running")
         return 1
     app = application(sys.argv)
@@ -460,7 +470,7 @@ def main() -> int:
     # comes and goes. Without this, either one closing as the last window exits
     # the app, and the dictation hotkey dies with it.
     app.setQuitOnLastWindowClosed(False)
-    Shout(cfg).run(app)
+    Shout(cfg).run(app, open_window=open_window)
     return 0
 
 
