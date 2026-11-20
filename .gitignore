@@ -12,6 +12,8 @@ transcripts/
 # --- environment ----------------------------------------------------------
 .venv/
 models/
+# llama.cpp's server for cleanup, fetched by scripts/download_cleanup.py
+tools/
 __pycache__/
 *.py[cod]
 .env

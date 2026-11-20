@@ -156,7 +156,7 @@ refreshed twice a second only while Home shows; the orb animates only then too.
 on the last dictation goes to Recent with its fix bar open.
 
 **Settings** writes one key per control through `merge()` (`language`,
-`input_device`, `overlay`, `cues`, `cue_volume`). Only `cue_volume` is followed
+`input_device`, `cleanup`, `overlay`, `cues`, `cue_volume`). Only `cue_volume` is followed
 live; the rest say "Restart Shout to apply." The microphone list is "Follow the
 Windows default (recommended)" plus the MME inputs other than the Sound Mapper,
 because `input_device` is an MME index and Windows renumbers those. **Start with
@@ -384,6 +384,67 @@ words and fixes you save are, because you asked, and `shout.log` records only
 their counts. **Re-run `harness/probe_words.py` after touching `words.py`, the
 `hotwords`/`word_timestamps` arguments, or `PUNCTUATION_PROMPT`.** It needs the
 GPU and about a minute, synthesizes no keys, and is safe while Shout runs.
+
+## Cleanup
+
+`shout/cleanup.py`, on by default (`cleanup` key, restart to apply). Built 19 Nov
+2026. Pipeline: `assemble()` -> fixes -> **cleanup** -> `questions.punctuate()`.
+Fixes run first because they are your decisions about Whisper's own tokens;
+questions run last because they read sentences cleanup may have just split.
+`transcribe_both()` returns (pasted, heard); Recent keeps `heard` only when cleanup
+changed something and shows it as a tooltip ("cleaned up" beside the time).
+
+Three layers, each measured on the 44-case set now in `harness/probe_cleanup.py`
+(TTS clips through the production call, plus run-ons made by stripping
+Whisper's punctuation, since SAPI never triggers its run-on mode):
+
+- **Hesitations by word list** (um/uh/er, never an all-caps token, never "hmm",
+  "like" or "you know"). Whisper KEEPS them: `PUNCTUATION_PROMPT` contains "Hmm."
+  and "Wait, no.", which primes it to. 17 of 17 removed, 0 real words touched.
+- **`needs_model`** sends only a correction phrase, a stutter or a run-on (16+
+  words with fewer than one mark per 15, commas counted: run-on mode drops them
+  all) to the model. Everything else pastes with no added delay and Whisper's
+  punctuation untouched. Over 200 words skips the model.
+- **Qwen3-4B-Instruct-2507 Q4_K_M** (Apache-2.0, 3.2 GB VRAM) served by llama.cpp
+  b12555's prebuilt CUDA 13.5 `llama-server` as a child on 127.0.0.1, then
+  **`guard()`**, which rebuilds the text from the INPUT's tokens: the model only
+  picks which survive, the punctuation after each, and the first-letter case of
+  plain words. A deletion must be a stutter (<=3 words) or a span of <=5 words
+  ending in an editing term, checked at every equivalent alignment ("the left
+  case no wait the right case"). Anything else, contractions included, refuses
+  and the text pastes after layer 1. The log carries the refusal's KIND only.
+
+Why these and not others, measured 19 Nov: Qwen3-1.7B unguarded lost 24 real
+words (kept "Bob" over "Rob", cut "Do not change anything else about the
+layout") and guarded removed only 28/48. The 4B: 46/48 removed, run-on sentence
+ends 8 -> 26-30, 0 lost and 0 invented. In-process is impossible: CTranslate2
+disabled INT8 on sm_120 in 4.6.2, so the 4B would need ~8 GB fp16, and no
+maintained llama-cpp-python wheel targets sm_120. **Speculative decoding
+(`ngram-simple`, n=2 m=16) is free accuracy-wise** (identical text on 23/23 over
+five settings, greedy verifies every draft) and took short calls 132 -> 63ms
+median; long run-ons only 364 -> 288ms (max ~450), because each inserted mark
+breaks the copy-draft. The bake-off's earlier "156ms long" timed punctuated
+text the gate never sends; do not quote it.
+
+Traps: the server is a console exe, so it needs `CREATE_NO_WINDOW` under
+`shoutw.exe`; it is in a kill-on-close job object so a crashed Shout cannot
+orphan 3.2 GB (probe row, with the no-job control surviving); its stdout is
+drained forever after the startup lines, or a full pipe stalls it; and
+`urllib` gets an empty `ProxyHandler` so a proxy env var cannot route loopback.
+Smart App Control has not blocked the unsigned exe yet; if it does, `start()`
+logs it and cleanup stays at layer 1. **Fails open everywhere**: no server,
+timeout (1.0s), error or refusal pastes the hesitation-free text.
+
+C4 is a Whisper finding, not a cleanup one: "I need five, I mean six, booster
+boxes" came back "I need five booster boxes". Whisper dropped the correction
+and kept the WRONG number, so no text pass can recover it.
+
+**Re-run `harness/probe_cleanup.py` after touching `cleanup.py`, the prompt, the
+pins, or `SERVER_ARGS`.** Its end-to-end "no word lost" rows are about the
+MODEL: with the guard gutted they still pass on the 4B, so the guard is covered
+only by its 12 text rows and the swapped-word loop row (all 13 flip). Upgrading
+llama.cpp or the model means new pins in BOTH `cleanup.py` and
+`scripts/download_cleanup.py` (SHA-256 checked there).
 
 ## Commit guard
 

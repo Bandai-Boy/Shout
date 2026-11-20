@@ -73,6 +73,11 @@ class Config:
     # What Whisper heard -> what to write instead, whole words only.
     replacements: dict = field(default_factory=dict)
 
+    # --- cleanup (shout.cleanup) ---
+    # Hesitations out, self-corrections applied, run-ons punctuated, by a local
+    # model behind a guard that only lets it delete. Read at launch.
+    cleanup: bool = True
+
     # --- diagnostics ---
     log_level: str = "INFO"
 

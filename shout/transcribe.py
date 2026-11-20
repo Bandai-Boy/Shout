@@ -212,7 +212,13 @@ class Transcriber:
         log.info("warmup %.2fs -> %r", dt, text[:60])
         return dt
 
-    def transcribe(self, audio: np.ndarray, vocab: Vocab = Vocab()) -> str:
+    def transcribe(self, audio: np.ndarray, vocab: Vocab = Vocab(), cleaner=None) -> str:
+        return self.transcribe_both(audio, vocab, cleaner)[0]
+
+    def transcribe_both(self, audio: np.ndarray, vocab: Vocab = Vocab(),
+                        cleaner=None) -> tuple[str, str]:
+        """(text to paste, what was heard before cleanup). The same unless a
+        `shout.cleanup.Cleaner` is passed and changes something."""
         if self.model is None:
             raise RuntimeError("transcribe() before load()")
         t0 = time.perf_counter()
@@ -238,6 +244,12 @@ class Transcriber:
         segs = list(segments)
         text, dropped, tail = assemble(segs)
         text, fixed = vocab.apply(text)
+        # After your fixes, which are decisions about Whisper's own words; before
+        # the question marks, which read sentences cleanup may have just split.
+        heard = text
+        cleaned = cleaner.clean(text) if cleaner is not None else None
+        if cleaned is not None:
+            text = cleaned.text
         text, asked = questions.punctuate(text)
         # Numbers only, never the words. These are what a confidence-based
         # filter would have to be tuned on, so they are recorded now rather
@@ -259,8 +271,18 @@ class Transcriber:
         if hint or fixed:
             log.info("your words: %d heard (%d chars), %d fixes made",
                      len(vocab.heard()), len(hint or ""), fixed)
+        if cleaned is not None and (cleaned.fillers or cleaned.why):
+            # Counts and the KIND of a refusal only, never words.
+            log.info("cleanup: %d hesitations removed%s", cleaned.fillers,
+                     "" if not cleaned.why else
+                     f"; model for {cleaned.why} in {cleaned.model_ms:.0f}ms, "
+                     + (f"not used ({cleaned.refused})"
+                        if cleaned.refused else
+                        f"{len(heard.split()) - len(cleaned.text.split())} words out"))
         # A count of words, never the words: the home page totals them.
         log.info("transcribed %.1fs of audio in %.2fs -> %d chars, %d words",
                  len(audio) / SAMPLE_RATE, time.perf_counter() - t0, len(text),
                  len(text.split()))
-        return text
+        # Recent shows `heard` only when cleanup changed something, so a
+        # question mark alone does not mark an entry as cleaned.
+        return text, (heard if cleaned is not None and cleaned.text != heard else text)

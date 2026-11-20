@@ -235,11 +235,11 @@ def main() -> int:
             def held(text: str) -> SimpleNamespace:
                 """A transcriber that stays busy until the probe releases it, so
                 the pill can be looked at while the commit is still in flight."""
-                def transcribe(audio, vocab=None) -> str:
+                def transcribe_both(audio, vocab=None, cleaner=None):
                     entered.set()
                     release.wait(5)
-                    return text
-                return SimpleNamespace(transcribe=transcribe)
+                    return text, text
+                return SimpleNamespace(transcribe_both=transcribe_both)
 
             def says_transcribing(how: str) -> None:
                 # The watchdog dispatches every 20ms whatever else is happening,
@@ -319,7 +319,7 @@ def main() -> int:
                 raise OSError("simulated paste failure")
 
             inj.inject = broken
-            app.transcriber = SimpleNamespace(transcribe=lambda audio, vocab=None: "zebra quartz umbrella")
+            app.transcriber = SimpleNamespace(transcribe_both=lambda audio, vocab=None, cleaner=None: ("zebra quartz umbrella",) * 2)
             logging.disable(logging.CRITICAL)       # the traceback is expected
             try:
                 app._queue_commit([0.0] * 16000)
@@ -362,7 +362,7 @@ def main() -> int:
             shout_main.foreground = lambda: window[0]
 
             def dictate(words: str) -> str:
-                app.transcriber = SimpleNamespace(transcribe=lambda audio, vocab=None: words)
+                app.transcriber = SimpleNamespace(transcribe_both=lambda audio, vocab=None, cleaner=None, w=words: (w, w))
                 app._queue_commit([0.0] * 16000)
                 app.commits.submit(lambda: None).result(timeout=5)
                 return pasted[-1][0]

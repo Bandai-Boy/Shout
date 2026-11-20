@@ -6,6 +6,7 @@
 
 - **Fast.** Measured from letting go of the keys to text on screen: about 0.2 s for a sentence, 0.4 s for a long paragraph, and under a second for a full minute of speech (RTX 5070).
 - **Private.** No cloud, no account, and no network at all once it's installed. What you dictate is never written to disk.
+- **Cleans up after you.** "Um" and "uh" come out, a correction like "meet at two, actually three" comes out as "meet at three", and a run-on paragraph gets its sentences back. A small local model does it, and it can only ever remove words, never add or change one.
 - **Learns your words.** Teach it the names it gets wrong (cards, sets, people, products) and fix a misheard word once: it's right from the next dictation on.
 - **Works everywhere.** It pastes, so it works in any app that takes text, and it puts your clipboard back afterwards.
 - **Hands-free when you want it.** Double-tap the keys and keep talking without holding anything.
@@ -14,9 +15,9 @@
 ## Requirements
 
 - **Windows 10 or 11.** Developed and tested on Windows 11.
-- **An NVIDIA GPU**, GTX 16-series / RTX 20-series or newer, with a current driver. The model uses about 2.3 GB of VRAM while Shout runs. See [Known limitations](#known-limitations) for older cards and CPU-only machines.
+- **An NVIDIA GPU**, GTX 16-series / RTX 20-series or newer, with a current driver. Shout uses about 5.5 GB of VRAM while it runs: 2.3 GB for speech recognition and 3.2 GB for cleanup (turn cleanup off in Settings to give that back). See [Known limitations](#known-limitations) for older cards and CPU-only machines.
 - **[git](https://git-scm.com/) and [uv](https://docs.astral.sh/uv/)**. Install uv with `winget install --id=astral-sh.uv -e`. It fetches the right Python version by itself.
-- **About 4 GB of disk.** The Python environment is 2.5 GB (mostly NVIDIA's CUDA libraries) and the model is 1.6 GB.
+- **About 8 GB of disk.** The Python environment is 2.5 GB (mostly NVIDIA's CUDA libraries), the speech model is 1.6 GB, and cleanup is 3.4 GB (llama.cpp's server with its CUDA libraries, and the 2.5 GB model).
 
 ## Install
 
@@ -29,9 +30,11 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 That one script:
 
 1. builds the Python environment from the lockfile;
-2. downloads the model, which is the only time Shout ever uses the network;
-3. checks that the model actually transcribes correctly on your GPU;
+2. downloads the speech model and checks that it transcribes correctly on your GPU;
+3. downloads the cleanup model and a pinned release of [llama.cpp](https://github.com/ggml-org/llama.cpp)'s server, refuses either if its checksum doesn't match, and checks one cleanup on your GPU (if this step fails, Shout still dictates; cleanup then only removes "um" and "uh");
 4. adds Shout to the Start menu.
+
+Steps 2 and 3 are the only time Shout ever uses the network.
 
 Most of the few minutes it takes is the download.
 
@@ -51,7 +54,8 @@ Start **Shout** from the Start menu. A tray icon appears, and a pill sits above 
 | Teach it a word | On **Recent dictations...**, select the word Shout got wrong, press **Fix**, type what you meant, and press **Save fix**. From then on Shout writes it your way, and if it's a name (it has a capital letter) Shout also listens for it. Right-click the tray icon and choose **Words...** to add names before Shout ever gets them wrong, or to remove one. |
 | Change the sounds | Right-click the tray icon and choose **Cue sounds...** |
 | Change the look | Right-click the tray icon and choose **Appearance**, then **Pill** or **Orb**. The orb rests as a small glass capsule and swells into a glowing ring whose crests move with your voice. To adjust the orb (its waves, turbulence, spin, size and colour), choose **Orb look...** (the window's **Look** page), watch the preview, and press **Save to config**. The **On screen** switch on that page also picks between the pill and the orb. |
-| Change settings | Right-click the tray icon and choose **Settings...** for the language, the microphone, the pill on or off, cue sounds and their volume, and starting with Windows. The page says which ones need a restart. |
+| See what cleanup changed | On **Recent dictations...**, a cleaned dictation says *cleaned up* next to its time. Hover over it to see what Shout heard before cleanup. |
+| Change settings | Right-click the tray icon and choose **Settings...** for the language, the microphone, cleanup on or off, the pill on or off, cue sounds and their volume, and starting with Windows. The page says which ones need a restart. |
 | Quit | Right-click the tray icon and choose **Quit Shout**. |
 
 A recording finishes and transcribes on its own after 2 minutes of holding, or 10 minutes hands-free.
@@ -74,6 +78,7 @@ Settings live in `%APPDATA%\Shout\config.json`. The **Settings** page changes th
 | `orb_tune` | `{}` | The orb's look, as the settings you changed on the Look page. Takes effect without a restart. |
 | `words` | `[]` | Names Shout listens for, oldest first. About 250 characters' worth are used, newest first; the Words page shows how much room is left. Takes effect without a restart. |
 | `replacements` | `{}` | What Shout heard mapped to what to write instead, as whole words: `{"tseg player": "TCGplayer"}`. Takes effect without a restart. |
+| `cleanup` | `true` | Removes "um" and "uh", applies spoken corrections, and punctuates run-ons. `false` pastes exactly what Whisper heard and frees 3.2 GB of VRAM. |
 | `ptt_ceiling_s`, `latch_ceiling_s` | `120`, `600` | The automatic stop limits, in seconds. |
 | `tap_max_ms`, `latch_window_ms` | `300`, `350` | How short a press counts as a tap, and how quickly the second tap of a double-tap must follow. |
 
@@ -86,9 +91,10 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 | **Keyboard** | A low-level hook that watches for Ctrl+Win. It never blocks a key, and it remembers nothing except which keys are held down right now. |
 | **Microphone** | Opened when you press Ctrl+Win and closed when you finish (unless you set `preroll_ms`). Audio stays in memory and is discarded after transcription. It is never written to disk. |
 | **Clipboard** | Text is pasted via the clipboard and marked private, so it stays out of Windows Clipboard History and cloud clipboard sync. Your previous clipboard is put back, with its own privacy intact. Copying a dictation back from the tray icon or the recent list marks it private too. |
-| **Recent dictations** | Your last 10 dictations are kept in memory, so you can copy one back if a paste missed. They are never written to disk and are forgotten when Shout quits. **Clear** on the Recent dictations page forgets them sooner. |
+| **Recent dictations** | Your last 10 dictations are kept in memory, so you can copy one back if a paste missed, along with what Shout heard before cleanup changed them. They are never written to disk and are forgotten when Shout quits. **Clear** on the Recent dictations page forgets them sooner. |
+| **Cleanup** | Shout starts llama.cpp's server as a hidden child process listening on `127.0.0.1` only, so nothing outside your PC can reach it, and it ends when Shout does (even if Shout crashes). A dictation that needs cleaning is sent to it over that loopback connection. Its output is shown to nothing else, and the server's own log is discarded once it has started. |
 | **Keystrokes** | One synthetic Ctrl+V per dictation, sent only after you've let go of Ctrl+Win. |
-| **Network** | None while running. Shout loads the model with `HF_HUB_OFFLINE=1` and `local_files_only=True`, and the installer's model download is the only network access. To check for yourself, `git grep -n -E "(import\|from) (requests\|urllib\|http\|socket\|httpx)" -- shout/` finds nothing. |
+| **Network** | Nothing leaves your PC while Shout runs. It loads its models with `HF_HUB_OFFLINE=1` and `local_files_only=True`, and the installer's downloads are the only network access. The one network code in the app is `shout/cleanup.py` talking to its own server on `127.0.0.1`. To check for yourself, `git grep -n -E "(import\|from) (requests\|urllib\|http\|socket\|httpx)" -- shout/` finds only that file, and every address in it is `127.0.0.1`. |
 | **Disk** | `%APPDATA%\Shout\config.json`, plus `shout.log`, which records timings, character and word counts, device names and the model's own per-segment confidence numbers, but never your words. The Home page's daily totals are read back from those counts. |
 | **Your words** | The names you add on the Words page, and each fix you save (the word Shout heard and the word you meant), are kept in `config.json`, because you asked for them to be remembered. Nothing else from a dictation is. `shout.log` records only how many words and fixes were used. |
 | **Startup** | Only if you installed with `-Autostart` or turned on **Start with Windows** in Settings: a shortcut in your own Startup folder, removed when you turn it off. |
@@ -113,11 +119,12 @@ Shout needs a keyboard hook, your microphone and your clipboard. That's exactly 
 1. Right-click the tray icon and choose **Quit Shout**.
 2. Delete `Shout.lnk` from `%APPDATA%\Microsoft\Windows\Start Menu\Programs`, and from its `Startup` folder if you used `-Autostart`.
 3. Delete the Shout folder and `%APPDATA%\Shout`.
-4. Delete the model from `%USERPROFILE%\.cache\huggingface\hub\models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`.
+4. Delete the models from `%USERPROFILE%\.cache\huggingface\hub`: `models--mobiuslabsgmbh--faster-whisper-large-v3-turbo` and `models--unsloth--Qwen3-4B-Instruct-2507-GGUF`.
 
 ## How it's built
 
 - **Speech recognition:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) runs Whisper large-v3-turbo on the GPU in float16. The model stays loaded, and a warm-up transcription at launch pays CUDA's one-time startup cost before you need it.
+- **Cleanup:** a word list removes "um" and "uh". Only a dictation with a correction phrase, a repeated word or no punctuation goes on to [Qwen3-4B-Instruct](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) (Apache-2.0, 4-bit), run by llama.cpp's prebuilt CUDA server. A guard then rebuilds the text from Whisper's own words: the model can only choose which words to drop (a short span ending in "actually", "sorry", "I mean" and the like, or a repeated word) and where the punctuation goes. Any other edit is refused, and the dictation pastes as heard. It adds about 0.07 s to a short dictation that needs it and about 0.3 s to a long run-on, and nothing to the rest.
 - **CUDA:** it comes from NVIDIA's pip wheels (cuBLAS, cuDNN), so there's no CUDA Toolkit to install.
 - **Hotkey:** a low-level keyboard hook ([pynput](https://github.com/moses-palmer/pynput)), because Windows' `RegisterHotKey` can't bind a modifier-only chord.
 - **Interface:** [Qt](https://doc.qt.io/qtforpython-6/) draws the pill, the tray icon and the Shout window.

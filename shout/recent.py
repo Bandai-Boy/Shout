@@ -21,7 +21,10 @@ SIZE = 10
 @dataclass(frozen=True)
 class Entry:
     at: float           # time.time() when the transcript came back
-    text: str
+    text: str           # what was pasted
+    # What Whisper heard before cleanup changed it; None when cleanup changed
+    # nothing. Shown on hover, so a word cleanup took is never lost.
+    heard: str | None = None
 
 
 class Recent:
@@ -34,9 +37,10 @@ class Recent:
         # one int rather than the entries.
         self.version = 0
 
-    def add(self, text: str) -> None:
+    def add(self, text: str, heard: str | None = None) -> None:
         with self._lock:
-            self._items.append(Entry(time.time(), text))
+            self._items.append(Entry(time.time(), text,
+                                     heard if heard and heard != text else None))
             self.version += 1
 
     def clear(self) -> None:

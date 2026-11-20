@@ -44,6 +44,7 @@ from .tray import Tray
 from .watchdog import Watchdog
 from .window import Window, application
 from .words import Vocab
+from .cleanup import Cleaner
 from .winapi import user32
 
 
@@ -107,6 +108,9 @@ class Shout:
         # Your words. Replaced whole by _follow_config and read once per
         # dictation by the commit thread, so neither side needs a lock.
         self.vocab = Vocab.resolve(cfg.words, cfg.replacements)
+        # Hesitations, self-corrections, run-ons. Its server starts in run(),
+        # on its own thread; until it is up, cleanup is the word list alone.
+        self.cleaner = Cleaner(enabled=cfg.cleanup)
         self.gestures = Gestures(cfg.tap_max_ms, cfg.latch_window_ms,
                                  cfg.ptt_ceiling_s, cfg.latch_ceiling_s)
         self.hotkey = HotkeyListener(self._on_gesture_event)
@@ -334,13 +338,14 @@ class Shout:
             if not self.ready.wait(timeout=60):
                 self.tray.notify("Model is still loading — clip dropped")
                 return
-            text = self.transcriber.transcribe(audio, self.vocab)
+            text, heard = self.transcriber.transcribe_both(audio, self.vocab,
+                                                           self.cleaner)
             if not text:
                 log.info("empty transcript, nothing to inject")
                 return
             # Before the paste, so a paste that fails or lands nowhere still
             # leaves the words somewhere to get them back from.
-            self.recent.add(text)
+            self.recent.add(text, heard)
             # Back-to-back dictations would otherwise paste as "that?Ironically".
             into = foreground()
             joins = (into == self._pasted_into
@@ -418,6 +423,7 @@ class Shout:
         self.overlay.build()
         self.watch_config()
         threading.Thread(target=self._load_model, name="model", daemon=True).start()
+        threading.Thread(target=self.cleaner.start, name="cleanup", daemon=True).start()
         self.recorder.arm()
         self.hotkey.start()
         self.watchdog.start()
@@ -442,6 +448,7 @@ class Shout:
         self.recorder.close()
         self.cues.close()
         self.commits.shutdown(wait=False)
+        self.cleaner.stop()
         self.overlay.stop()
         self.tray.stop()
         # Not a direct QApplication.quit(): from a worker thread that sets a

@@ -117,6 +117,7 @@ say so in words, not in a colour.
 from __future__ import annotations
 
 import ctypes
+import html
 import json
 import math
 import os
@@ -1791,13 +1792,24 @@ class EntryRow(QtWidgets.QFrame):
         row.setSpacing(12)
         col = QtWidgets.QVBoxLayout()
         col.setSpacing(4)
-        when = label(clock(entry.at), 12, name="when")
+        when = label(clock(entry.at) + (" · cleaned up" if entry.heard else ""), 12,
+                     name="when")
         shown = entry.text
         if len(shown) > self.SHOWN_CHARS:
             shown = shown[:self.SHOWN_CHARS].rstrip() + "…"
         self.text = label(shown, 14, light=True, wrap=True)
         self.text.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        if entry.heard:
+            # What Whisper heard before cleanup, so a word cleanup took is
+            # always one hover away. Escaped: a tooltip renders anything that
+            # looks like HTML.
+            heard = entry.heard
+            if len(heard) > self.SHOWN_CHARS:
+                heard = heard[:self.SHOWN_CHARS].rstrip() + "…"
+            tip = f"<p>Heard before cleanup:<br>{html.escape(heard)}</p>"
+            self.text.setToolTip(tip)
+            when.setToolTip(tip)
         col.addWidget(when)
         col.addWidget(self.text)
         row.addLayout(col, 1)
@@ -2720,6 +2732,14 @@ class SettingsPage(QtWidgets.QWidget):
         self._field(dictation, "Microphone", "Following the default moves with you "
                     "when you switch mics in Windows. A named one is saved by its "
                     "number, which Windows can renumber. " + RESTART, self.mic)
+        self.cleanup = Pill("Clean up dictations")
+        self.cleanup.setChecked(bool(cfg.cleanup))
+        self.cleanup.toggled.connect(lambda on: self._write("cleanup", on))
+        dictation.box.addWidget(self.cleanup)
+        dictation.box.addWidget(label(
+            "Takes out um and uh, applies corrections like \"two, actually three\", "
+            "and punctuates run-ons, on this PC. It only ever removes words; Recent "
+            "shows what was heard. " + RESTART, 12, wrap=True, name="sub"))
         dictation.box.addStretch(1)
         left.addWidget(dictation, 1)
         cards.addLayout(left, 1)
